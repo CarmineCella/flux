@@ -1,0 +1,54 @@
+Let's designa a small but functional language interpreter in C++: let's call it Flux.
+These are the rules:
+- it must be a recursive descendent parser in standard C++17, without any external library
+- no more than 650 lines of code
+- it must have the following types: list, string, vectors of floating point numbers (scalar is a vector of size 1) and functions as first-class object; use std::variant to contain all types 
+- the vectors should be implemented with std::valarray and with all the connected library of arithmetics (+--*/) and reduction (sum, mean, etc). All with broadcast
+- since functions are first-class objects, the user can store a function in a variable and call it later
+- the language must be statically scoped with closure, supporting nested enviroments like scheme (use std::shared_ptr if necessary)
+- the language will have a error function that will display the current file and line number of the error
+- make sure there is both arity checking and type checking on the operators
+- the code will be written in flux.h that will be included in flux.cpp: the main program will load and run all files passed in the command line; if no files are passed, a repl session will open prompting ">> " to the user
+- the primitives i want are: var, func, if, else, while, for, all math operators of valarray, return, break, continue, print, read/write/append (they will take a filaname string and a variable and put serialize it on file -- using the same print function but this time on disk), some string manipulation functions
+- print is a special form and requires no parenthesis and has variadic arguments
+- the syntax will be the following:
+
+# a simple script in flux - this is a comment
+
+load ("a_module.mu") # load another file containing vars and procs
+
+var a = 10
+var b = 20
+
+func sum_two (x, y) {
+    return x + y
+}
+
+print "the sum is " sum_two (a, b)
+var text = "this is a string"
+
+write ("output.txt", text)
+var r = read ("output.txt")
+print "the file contains: " r   
+
+var g = 1.221332
+print "expression: " ( a + b ) * g / 10 - 3.2
+
+var i = 0
+while (i < 10) {
+    print text
+    i = i + 1
+}
+
+if (g > 0.5) {
+    print "g is big"
+} else {
+    print "g is small"
+}
+
+
+var h = .532 # float literal with leading dot
+
+
+generate the two files in C++ flux.h and flux.cpp
+
