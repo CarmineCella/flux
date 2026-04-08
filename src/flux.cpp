@@ -1,7 +1,10 @@
 #include "flux.h"
+#include "dsp.h"
 
 int main(int argc, char* argv[]) {
     flux::Interpreter interp;
+    flux::register_dsp(interp);
+
     std::vector<std::string> files;
     flux::List flux_argv;
     bool enter_repl = false;
@@ -19,7 +22,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: flux [options] [files...]\n"
                       << "  --i          enter REPL after running files\n"
-                      << "  --stack n    set max recursion depth (default: 10000)\n"
+                      << "  --stack n    set max recursion depth (default: 1000)\n"
                       << "  --args ...   pass remaining arguments as __argv\n"
                       << "  --help       show this help\n";
             return 0;
