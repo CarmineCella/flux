@@ -1,0 +1,10 @@
+- test_dsplib.flux
+- convert all DSP examples from pure0/musil
+- from musil: convert system, test_system, plotting, scientific, test_scientific, all examples
+- from pure0: convert beats, test_beat, examples
+- from pure0: convert sampsynth, and all associate code
+- implement instrumental granulator, maple, pvoc (?), bconv (?), orchidea
+- implement live rt sound with miniaudio
+- port all this back to musil for the IDE
+
+
