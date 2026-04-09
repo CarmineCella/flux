@@ -1,9 +1,12 @@
 #include "flux.h"
 #include "dsp.h"
+#include "sampsynth.h"
 
 int main(int argc, char* argv[]) {
     flux::Interpreter interp;
     flux::register_dsp(interp);
+    flux::register_sampsynth(interp);
+
 
     std::vector<std::string> files;
     flux::List flux_argv;
@@ -41,8 +44,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (files.empty() || enter_repl)
+    if (files.empty() || enter_repl) {
+        std::cout << "[flux, v0.2]\n\n";
+        std::cout << "Copyright (c) 2026-2030 Carmine-Emanuele Cella.\nAll rights reserved.\n\n";
         interp.repl();
+    }
 
     return 0;
 }

@@ -1,0 +1,4 @@
+.DS_Store
+examples/*.wav
+examples/*.txt
+build/flux

@@ -14,6 +14,7 @@ install: flux
 	mkdir -p $(FLUXDIR)
 	install -m 644 ../src/stdlib.flux $(FLUXDIR)/stdlib.flux
 	install -m 644 ../src/dsp.flux $(FLUXDIR)/dsp.flux
+	install -m 644 ../src/sampsynth.flux $(FLUXDIR)/sampsynth.flux
 
 uninstall:
 	rm -f $(PREFIX)/bin/flux

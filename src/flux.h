@@ -1376,7 +1376,6 @@ struct Interpreter {
         run_file(fname,global);
     }
     void repl() {
-        std::cout<<"Flux 0.1 — type expressions or 'quit' to exit\n";
         std::string input;
         while(true) {
             std::cout<<(input.empty()?">> ":".. ")<<std::flush;
