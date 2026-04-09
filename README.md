@@ -7,11 +7,11 @@ in under a second, and runs either as a REPL or as a file interpreter.
 ## Quick start
 
 ```bash
-make            # compile
-make test       # run 222 tests
-make install    # install binary + stdlib to ~/.flux
-./flux          # open REPL
-./flux script.flux
+make                # compile
+make test           # run tests
+make install        # install binary + stdlib to ~/.flux
+./flux              # open REPL
+./flux script.flux  # run a script
 ```
 
 ## Command line
@@ -347,15 +347,6 @@ written in Flux itself:
 `__argv` — list of strings passed via `--args` on the command line
 
 ## Architecture
-
-```
-flux.cpp          — 45 lines: CLI argument parsing, file loading, REPL entry
-flux.h            — ~715 lines: lexer, parser, interpreter, builtins
-stdlib.flux       — ~440 lines: standard library in Flux
-test_core.flux    — 147 tests for the core
-test_stdlib.flux  — 75 tests for the stdlib
-reference.flux    — annotated showcase of every feature
-```
 
 The interpreter is a recursive-descent parser producing a shared-pointer AST,
 evaluated by a tree-walking interpreter. Each AST node carries its source file
