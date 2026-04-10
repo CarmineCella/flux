@@ -3,7 +3,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic
 PREFIX   ?= /usr/local
 FLUXDIR  ?= $(HOME)/.flux
 
-flux: ../src/flux.cpp ../src/flux.h ../src/dsp.h
+flux: ../src/flux.cpp ../src/flux.h ../src/dsp.h ../src/sampsynth.h
 	$(CXX) $(CXXFLAGS) -o $@ ../src/flux.cpp
 
 test: flux

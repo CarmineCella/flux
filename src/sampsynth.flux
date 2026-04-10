@@ -1,6 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════
 # sampsynth.flux — convenience wrappers for sample synthesis
-# load ("sampsynth.flux")
 # ══════════════════════════════════════════════════════════════════════
 
 load ("dsp.flux")
@@ -23,8 +22,6 @@ func db_pitches_query (db, pattern) {
     return db_pitches(db_query(db, pattern))
 }
 
-# ── convenience: load first match ─────────────────────────────────────
-
 func db_pick_first (db, pattern, sr) {
     var matches = db_query(db, pattern)
     if (len(matches) == 0) {
@@ -34,14 +31,10 @@ func db_pick_first (db, pattern, sr) {
     return db_pick(matches[0], sr)
 }
 
-# ── orchgran output helpers ───────────────────────────────────────────
-
-func orchgran_normalize (result) {
-    return normalize(orchgran_render(result))
-}
+# ── orchgran helpers ──────────────────────────────────────────────────
 
 func orchgran_write (result, sr, path) {
-    var sig = normalize(orchgran_render(result))
+    var sig = normalize(orchgransnd(result))
     wavwrite(sig, sr, path)
     return sig
 }

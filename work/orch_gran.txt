@@ -1,0 +1,80 @@
+Orchestral Granulator
+---------------------
+
+The orchestral granulator is a generative system that distributes short sonic events (“grains”) across a virtual orchestra. Each instrument (or group of instruments) acts as an independent voice within a polyphonic texture.
+
+Orchestral Model
+
+The input is a specification of an orchestra, defined as a list of instruments or instrument groups:
+
+A flat list (e.g. ["Ob" "Fl"]) defines independent voices.
+Nested lists (e.g. [["Ob" "Fl"] ["Vn"]]) define synchronized groups, where instruments within a group are always triggered together, sharing the same temporal and musical parameters.
+
+Each instrument (or group) has a state: it is either active (currently playing a grain) or free.
+A new grain can only be triggered on a free instrument/group.
+
+Temporal Control (Evolving Parameters)
+
+The system allows continuous or piecewise evolution over time of the following parameters:
+
+Density (events per second)
+Density randomness (relative variation of density)
+Grain duration (seconds)
+Duration randomness (relative variation)
+Octave range (register constraints)
+Octave randomness
+
+These parameters define a time-varying field that governs the statistical behavior of the granulation process.
+
+Discrete Musical Constraints
+
+In addition to continuous parameters, the user specifies time-aligned musical structures:
+
+Chord timeline
+A sequence of pitch collections with associated time positions
+Playing style groups timeline
+(e.g. ordinario, sul ponticello, pizzicato, etc.)
+Dynamic groups timeline
+(e.g. pp, mf, ff)
+
+At any given time, the system draws from the currently active chord, style group, and dynamic group.
+
+Grain Generation Process
+
+When a new grain is to be generated:
+
+A free instrument (or group) is selected (typically the first available).
+The system samples:
+Onset time (based on density and its randomness)
+Duration
+Pitch (from the active chord, within octave constraints)
+Dynamic
+Playing style
+If the instrument belongs to a group, all instruments in the group are triggered synchronously with identical parameters.
+Sample Behavior
+If the generated duration is shorter than the underlying sample:
+→ the sound is truncated with a fade-out to match the duration.
+If the generated duration is longer than the sample:
+→ the sample plays until its natural end (no extension).
+Event Representation
+
+Each generated grain is stored as a structured event containing:
+
+Instrument (or group)
+Onset time
+Duration
+Pitch
+Dynamic
+Playing style
+
+The full output is a time-ordered list of events, which can be exported (e.g., as a score, MIDI, or control data).
+
+Conceptual Framing
+
+The orchestral granulator can be understood as:
+
+A scheduler of musical events under resource constraints (instrument availability)
+A mapping from statistical processes to orchestral writing
+A bridge between granular synthesis and instrumental composition
+
+Rather than operating on audio samples alone, it operates on orchestral identities, producing a texture that is both stochastic and structurally guided.
