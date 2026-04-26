@@ -13,6 +13,7 @@
 #include <valarray>
 #include <variant>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <functional>
 #include <cmath>
@@ -22,6 +23,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
+#include <thread>
+#include <random>
 #include <array>
 #include <filesystem>
 
@@ -35,14 +38,18 @@ struct Value;
 using Vec     = std::valarray<double>;
 using List    = std::vector<Value>;
 using ListPtr = std::shared_ptr<List>;
+using DictMap = std::unordered_map<std::string, Value>;
+using DictPtr = std::shared_ptr<DictMap>;
 using Str     = std::string;
 
 struct Stmt;
+struct Expr;
 struct Closure {
     std::string name;
     std::vector<std::string> params;
     std::vector<Stmt> body;
     EnvPtr env;
+    const Expr* origin = nullptr;   // shared pointer to the FuncDecl AST node
 };
 using NativeFn = std::function<Value(const std::vector<Value>&, int, const std::string&)>;
 using YieldFn  = std::function<void()>;
@@ -76,13 +83,14 @@ struct Error : std::exception {
 
 // ── Value — scalars are Vec of size 1 ─────────────────────────────────
 struct Value {
-    std::variant<Vec, Str, ListPtr, Closure, NativeFn, std::nullptr_t> data;
+    std::variant<Vec, Str, ListPtr, DictPtr, Closure, NativeFn, std::nullptr_t> data;
     Value() : data(nullptr) {}
     Value(double d) : data(Vec{d}) {}
     Value(Vec v)    : data(std::move(v)) {}
     Value(Str s)    : data(std::move(s)) {}
     Value(List l)   : data(std::make_shared<List>(std::move(l))) {}
     Value(ListPtr p): data(std::move(p)) {}
+    Value(DictPtr p): data(std::move(p)) {}
     Value(Closure c): data(std::move(c)) {}
     Value(NativeFn f): data(std::move(f)) {}
     Value(std::nullptr_t) : data(nullptr) {}
@@ -90,6 +98,7 @@ struct Value {
     bool is_vec()     const { return std::holds_alternative<Vec>(data); }
     bool is_str()     const { return std::holds_alternative<Str>(data); }
     bool is_list()    const { return std::holds_alternative<ListPtr>(data); }
+    bool is_dict()    const { return std::holds_alternative<DictPtr>(data); }
     bool is_closure() const { return std::holds_alternative<Closure>(data); }
     bool is_native()  const { return std::holds_alternative<NativeFn>(data); }
     bool is_nil()     const { return std::holds_alternative<std::nullptr_t>(data); }
@@ -101,15 +110,28 @@ struct Value {
     // shared_ptr itself is not modified — only the pointee.
     List&          as_list_mut() const { return *std::get<ListPtr>(data); }
     const ListPtr& as_list_ptr() const { return std::get<ListPtr>(data); }
+    const DictMap& as_dict()     const { return *std::get<DictPtr>(data); }
+    DictMap&       as_dict_mut() const { return *std::get<DictPtr>(data); }
+    const DictPtr& as_dict_ptr() const { return std::get<DictPtr>(data); }
     const Closure& as_closure()  const { return std::get<Closure>(data); }
     const NativeFn& as_native()  const { return std::get<NativeFn>(data); }
     double scalar() const { return as_vec()[0]; }
 
     bool truthy() const {
         if (is_nil()) return false;
-        if (is_vec()) return !(as_vec().size() == 1 && as_vec()[0] == 0.0);
+        if (is_vec()) {
+            // Multi-element vec is truthy iff every element is non-zero.
+            // This makes `if (v == w) { ... }` mean "all elements equal",
+            // matching MATLAB/Octave semantics. Empty vec is falsy.
+            auto& v = as_vec();
+            if (v.size() == 0) return false;
+            for (size_t i = 0; i < v.size(); ++i)
+                if (v[i] == 0.0) return false;
+            return true;
+        }
         if (is_str()) return !as_str().empty();
         if (is_list()) return !as_list().empty();
+        if (is_dict()) return !as_dict().empty();
         return true;
     }
     static std::string fmt(double d) {
@@ -134,9 +156,63 @@ struct Value {
             for (size_t i = 0; i < l.size(); ++i) { if (i) r += ", "; r += l[i].repr(); }
             return r + ")";
         }
+        if (is_dict()) {
+            // Sort keys for deterministic, readable output.
+            auto& d = as_dict();
+            std::vector<std::string> keys;
+            keys.reserve(d.size());
+            for (auto& kv : d) keys.push_back(kv.first);
+            std::sort(keys.begin(), keys.end());
+            std::string r = "{";
+            for (size_t i = 0; i < keys.size(); ++i) {
+                if (i) r += ", ";
+                r += keys[i] + ": " + d.at(keys[i]).repr();
+            }
+            return r + "}";
+        }
         if (is_closure()) return "<func>";
         if (is_native())  return "<native>";
         return "?";
+    }
+
+    // Structural equality — recurses into lists and dicts. Closures and
+    // natives are never considered equal (their identity isn't observable
+    // here, since copies of a Value duplicate the underlying function object).
+    static bool deep_eq(const Value& a, const Value& b) {
+        if (a.is_nil()) return b.is_nil();
+        if (b.is_nil()) return false;
+        if (a.is_str()) return b.is_str() && a.as_str() == b.as_str();
+        if (b.is_str()) return false;
+        if (a.is_vec()) {
+            if (!b.is_vec()) return false;
+            auto& va = a.as_vec(); auto& vb = b.as_vec();
+            if (va.size() != vb.size()) return false;
+            for (size_t i = 0; i < va.size(); ++i) if (va[i] != vb[i]) return false;
+            return true;
+        }
+        if (b.is_vec()) return false;
+        if (a.is_list()) {
+            if (!b.is_list()) return false;
+            auto& la = a.as_list(); auto& lb = b.as_list();
+            if (la.size() != lb.size()) return false;
+            for (size_t i = 0; i < la.size(); ++i)
+                if (!deep_eq(la[i], lb[i])) return false;
+            return true;
+        }
+        if (b.is_list()) return false;
+        if (a.is_dict()) {
+            if (!b.is_dict()) return false;
+            auto& da = a.as_dict(); auto& db = b.as_dict();
+            if (da.size() != db.size()) return false;
+            for (auto& kv : da) {
+                auto it = db.find(kv.first);
+                if (it == db.end()) return false;
+                if (!deep_eq(kv.second, it->second)) return false;
+            }
+            return true;
+        }
+        if (b.is_dict()) return false;
+        return false;
     }
 };
 
@@ -163,8 +239,9 @@ struct Env {
 enum class Tk {
     Num, Str, Id, LPar, RPar, LBrace, RBrace, LBrack, RBrack,
     Plus, Minus, Star, Slash, Percent, Eq, EqEq, Neq, Lt, Gt, Le, Ge,
-    And, Or, Not, Comma, Semi, Dot, Eof,
-    Var, Func, If, Else, While, For, In, Return, Break, Continue, Print, Load
+    And, Or, Not, Comma, Semi, Dot, Colon, Eof,
+    Var, Func, If, Else, While, For, In, Return, Break, Continue,
+    Print, Load, Try, Catch, Assert
 };
 inline const char* tk_name(Tk t) {
     switch (t) {
@@ -195,6 +272,7 @@ inline const char* tk_name(Tk t) {
     case Tk::Comma:    return "','";
     case Tk::Semi:     return "';'";
     case Tk::Dot:      return "'.'";
+    case Tk::Colon:    return "':'";
     case Tk::Eof:      return "end of input";
     case Tk::Var:      return "'var'";
     case Tk::Func:     return "'func'";
@@ -208,6 +286,9 @@ inline const char* tk_name(Tk t) {
     case Tk::Continue: return "'continue'";
     case Tk::Print:    return "'print'";
     case Tk::Load:     return "'load'";
+    case Tk::Try:      return "'try'";
+    case Tk::Catch:    return "'catch'";
+    case Tk::Assert:   return "'assert'";
     }
     return "?";
 }
@@ -260,13 +341,28 @@ struct Lexer {
     int line = 1;
     std::string file;
     Lexer(std::string s, std::string f = "<repl>") : src(std::move(s)), file(std::move(f)) {}
-    char peek() { return pos < src.size() ? src[pos] : '\0'; }
+    char peek(size_t off = 0) const { return pos + off < src.size() ? src[pos + off] : '\0'; }
     char advance() { char c = peek(); if (c == '\n') ++line; ++pos; return c; }
     void skip() {
         while (pos < src.size()) {
-            if (std::isspace((unsigned char)src[pos])) advance();
-            else if (src[pos] == '#') { while (pos < src.size() && src[pos] != '\n') ++pos; }
-            else break;
+            char c = src[pos];
+            if (std::isspace((unsigned char)c)) { advance(); continue; }
+            if (c == '#') {
+                while (pos < src.size() && src[pos] != '\n') ++pos;
+                continue;
+            }
+            // Block comments: /* ... */ (non-nesting).
+            if (c == '/' && pos + 1 < src.size() && src[pos + 1] == '*') {
+                int start_line = line;
+                advance(); advance();   // consume /*
+                while (pos < src.size() &&
+                       !(src[pos] == '*' && pos + 1 < src.size() && src[pos + 1] == '/'))
+                    advance();
+                if (pos >= src.size()) err(file, start_line, "unterminated /* ... */ comment");
+                advance(); advance();   // consume */
+                continue;
+            }
+            break;
         }
     }
     Token next() {
@@ -277,25 +373,43 @@ struct Lexer {
         if (c == '"') {
             advance();
             std::string s;
-            while (peek() && peek() != '"') {
+            int str_start = ln;
+            while (pos < src.size() && peek() != '"') {
                 if (peek() == '\\') {
                     advance();
+                    if (pos >= src.size()) break;
                     char e = advance();
-                    if      (e == 'n') s += '\n';
-                    else if (e == 't') s += '\t';
-                    else               s += e;
+                    switch (e) {
+                    case 'n':  s += '\n'; break;
+                    case 't':  s += '\t'; break;
+                    case 'r':  s += '\r'; break;
+                    case '0':  s += '\0'; break;
+                    case '\\': s += '\\'; break;
+                    case '"':  s += '"';  break;
+                    default:   s += e;    break;
+                    }
                 } else s += advance();
             }
-            if (peek() == '"') advance();
+            if (peek() != '"') err(file, str_start, "unterminated string literal");
+            advance();
             return {Tk::Str, s, ln};
         }
         if (std::isdigit((unsigned char)c) ||
             (c == '.' && pos + 1 < src.size() && std::isdigit((unsigned char)src[pos + 1]))) {
             std::string n;
-            while (std::isdigit((unsigned char)peek()) || peek() == '.') n += advance();
+            bool seen_dot = false;
+            while (std::isdigit((unsigned char)peek()) || peek() == '.') {
+                if (peek() == '.') {
+                    if (seen_dot) err(file, ln, "invalid numeric literal: multiple decimal points");
+                    seen_dot = true;
+                }
+                n += advance();
+            }
             if (peek() == 'e' || peek() == 'E') {
                 n += advance();
                 if (peek() == '+' || peek() == '-') n += advance();
+                if (!std::isdigit((unsigned char)peek()))
+                    err(file, ln, "invalid numeric literal: missing exponent digits");
                 while (std::isdigit((unsigned char)peek())) n += advance();
             }
             return {Tk::Num, n, ln};
@@ -308,7 +422,8 @@ struct Lexer {
                 {"while", Tk::While}, {"for", Tk::For}, {"in", Tk::In},
                 {"return", Tk::Return}, {"break", Tk::Break}, {"continue", Tk::Continue},
                 {"print", Tk::Print}, {"load", Tk::Load},
-                {"and", Tk::And}, {"or", Tk::Or}, {"not", Tk::Not}
+                {"and", Tk::And}, {"or", Tk::Or}, {"not", Tk::Not},
+                {"try", Tk::Try}, {"catch", Tk::Catch}, {"assert", Tk::Assert}
             };
             auto it = kw.find(id);
             return {it != kw.end() ? it->second : Tk::Id, id, ln};
@@ -329,6 +444,7 @@ struct Lexer {
         case ',': return {Tk::Comma, ",", ln};
         case ';': return {Tk::Semi, ";", ln};
         case '.': return {Tk::Dot, ".", ln};
+        case ':': return {Tk::Colon, ":", ln};
         case '=': if (peek() == '=') { advance(); return {Tk::EqEq, "==", ln}; } return {Tk::Eq, "=", ln};
         case '!': if (peek() == '=') { advance(); return {Tk::Neq, "!=", ln}; } return {Tk::Not, "!", ln};
         case '<': if (peek() == '=') { advance(); return {Tk::Le, "<=", ln}; }  return {Tk::Lt, "<", ln};
@@ -346,9 +462,10 @@ struct Lexer {
 
 // ── AST — each node carries file + line ───────────────────────────────
 enum class NodeT {
-    Num, Str, Id, BinOp, UnaryOp, Call, Index, VecLit,
+    Num, Str, Id, BinOp, UnaryOp, Call, Index, Member, VecLit, DictLit,
     VarDecl, Assign, IndexAssign, FuncDecl, IfStmt, WhileStmt, ForStmt, ForIn,
-    ReturnStmt, BreakStmt, ContStmt, PrintStmt, Block, LoadStmt
+    ReturnStmt, BreakStmt, ContStmt, PrintStmt, Block, LoadStmt,
+    TryCatch, AssertStmt
 };
 struct Expr;
 using ExprPtr = std::shared_ptr<Expr>;
@@ -360,7 +477,7 @@ struct Expr {
     std::string str_val, op;
     ExprPtr left, right;
     std::vector<ExprPtr> args;
-    std::vector<std::string> params;
+    std::vector<std::string> params;   // also dict-literal keys for DictLit
     std::vector<Stmt> body;
     const std::string& src_file() const {
         static std::string u = "<?>";
@@ -371,6 +488,60 @@ struct Stmt { ExprPtr expr; };
 struct ReturnSignal   { Value val; };
 struct BreakSignal    {};
 struct ContinueSignal {};
+struct TailCall       { Value fn; std::vector<Value> args; };
+
+// ── Best-effort source reconstruction (used by 'assert') ──────────────
+inline std::string expr_to_string(const ExprPtr& e) {
+    if (!e) return "";
+    switch (e->type) {
+    case NodeT::Num: return Value::fmt(e->num_val);
+    case NodeT::Str: {
+        std::string r = "\"";
+        for (char c : e->str_val) {
+            if      (c == '\n') r += "\\n";
+            else if (c == '\t') r += "\\t";
+            else if (c == '"')  r += "\\\"";
+            else if (c == '\\') r += "\\\\";
+            else r += c;
+        }
+        return r + "\"";
+    }
+    case NodeT::Id: return e->str_val;
+    case NodeT::BinOp:
+        return expr_to_string(e->left) + " " + e->op + " " + expr_to_string(e->right);
+    case NodeT::UnaryOp:
+        return e->op + (e->op == "not" ? " " : "") + expr_to_string(e->left);
+    case NodeT::Call: {
+        std::string r = expr_to_string(e->left) + "(";
+        for (size_t i = 0; i < e->args.size(); ++i) {
+            if (i) r += ", ";
+            r += expr_to_string(e->args[i]);
+        }
+        return r + ")";
+    }
+    case NodeT::Index:
+        return expr_to_string(e->left) + "[" + expr_to_string(e->right) + "]";
+    case NodeT::Member:
+        return expr_to_string(e->left) + "." + e->str_val;
+    case NodeT::VecLit: {
+        std::string r = "[";
+        for (size_t i = 0; i < e->args.size(); ++i) {
+            if (i) r += ", ";
+            r += expr_to_string(e->args[i]);
+        }
+        return r + "]";
+    }
+    case NodeT::DictLit: {
+        std::string r = "{";
+        for (size_t i = 0; i < e->args.size(); ++i) {
+            if (i) r += ", ";
+            r += e->params[i] + ": " + expr_to_string(e->args[i]);
+        }
+        return r + "}";
+    }
+    default: return "<expr>";
+    }
+}
 
 // ── Parser ────────────────────────────────────────────────────────────
 struct Parser {
@@ -400,29 +571,28 @@ struct Parser {
         return s;
     }
     ExprPtr parse_stmt() {
-        int ln = cur().line;
-        if (check(Tk::Var)) return parse_var();
-        if (check(Tk::Func)) {
-            auto e = parse_func_expr();
-            if (!e->str_val.empty()) return e;
-            err(*file, ln, "top-level func needs a name");
-        }
-        if (check(Tk::If))    return parse_if();
-        if (check(Tk::While)) return parse_while();
-        if (check(Tk::For))   return parse_for();
+        int ln = cur().line; (void)ln;
+        if (check(Tk::Var))    return parse_var();
+        if (check(Tk::Func))   return parse_func(/*allow_name=*/true, /*require_name=*/true);
+        if (check(Tk::If))     return parse_if();
+        if (check(Tk::While))  return parse_while();
+        if (check(Tk::For))    return parse_for();
+        if (check(Tk::Try))    return parse_try();
         if (check(Tk::Return)) {
-            ++pos;
-            auto e = make(NodeT::ReturnStmt, ln);
-            if (!check(Tk::RBrace) && !check(Tk::Eof)) e->left = parse_expr();
+            int rln = cur().line; ++pos;
+            auto e = make(NodeT::ReturnStmt, rln);
+            if (!check(Tk::RBrace) && !check(Tk::Eof) && !check(Tk::Semi))
+                e->left = parse_expr();
             return e;
         }
-        if (check(Tk::Break))    { ++pos; return make(NodeT::BreakStmt, ln); }
-        if (check(Tk::Continue)) { ++pos; return make(NodeT::ContStmt, ln); }
+        if (check(Tk::Break))    { int bln = cur().line; ++pos; return make(NodeT::BreakStmt, bln); }
+        if (check(Tk::Continue)) { int cln = cur().line; ++pos; return make(NodeT::ContStmt, cln); }
         if (check(Tk::Print))    return parse_print();
+        if (check(Tk::Assert))   return parse_assert();
         if (check(Tk::Load)) {
-            ++pos;
+            int lln = cur().line; ++pos;
             eat(Tk::LPar);
-            auto e = make(NodeT::LoadStmt, ln);
+            auto e = make(NodeT::LoadStmt, lln);
             e->left = parse_expr();
             eat(Tk::RPar);
             return e;
@@ -438,11 +608,22 @@ struct Parser {
         e->left = parse_expr();
         return e;
     }
-    ExprPtr parse_func_expr() {
+    // Unified function parser. Statement-form (top-level / inside a block as a
+    // statement) requires a name; expression-form (inside a primary) forbids one
+    // — that prevents `var f = func g(){}` from also leaking `g` into scope.
+    ExprPtr parse_func(bool allow_name, bool require_name) {
         int ln = cur().line;
         eat(Tk::Func);
         auto e = make(NodeT::FuncDecl, ln);
-        e->str_val = check(Tk::Id) ? eat(Tk::Id).text : "";
+        if (check(Tk::Id)) {
+            if (!allow_name)
+                err(*file, ln, "function expression cannot be named here");
+            e->str_val = eat(Tk::Id).text;
+        } else {
+            if (require_name)
+                err(*file, ln, "function statement requires a name");
+            e->str_val = "";
+        }
         eat(Tk::LPar);
         while (!check(Tk::RPar)) {
             e->params.push_back(eat(Tk::Id).text);
@@ -522,12 +703,38 @@ struct Parser {
         e->body = parse_block();
         return e;
     }
+    ExprPtr parse_try() {
+        int ln = cur().line;
+        eat(Tk::Try);
+        auto e = make(NodeT::TryCatch, ln);
+        e->body = parse_block();
+        eat(Tk::Catch);
+        eat(Tk::LPar);
+        e->str_val = eat(Tk::Id).text;     // catch variable name
+        eat(Tk::RPar);
+        auto bl = make(NodeT::Block, cur().line);
+        bl->body = parse_block();
+        e->right = bl;                     // catch block
+        return e;
+    }
     ExprPtr parse_print() {
         int ln = cur().line;
         eat(Tk::Print);
         auto e = make(NodeT::PrintStmt, ln);
         while (!check(Tk::Eof) && !check(Tk::RBrace) && cur().line == ln)
             e->args.push_back(parse_expr());
+        return e;
+    }
+    ExprPtr parse_assert() {
+        int ln = cur().line;
+        eat(Tk::Assert);
+        eat(Tk::LPar);
+        auto e = make(NodeT::AssertStmt, ln);
+        e->left = parse_expr();
+        // Capture a textual rendering of the asserted expression for diagnostics.
+        e->str_val = expr_to_string(e->left);
+        if (match(Tk::Comma)) e->args.push_back(parse_expr());
+        eat(Tk::RPar);
         return e;
     }
     ExprPtr parse_assign() {
@@ -544,9 +751,20 @@ struct Parser {
             if (e->type == NodeT::Index) {
                 eat(Tk::Eq);
                 auto a = make(NodeT::IndexAssign, ln);
-                a->left  = e->left;                 // target (Id or another Index)
+                a->left  = e->left;                 // target
                 a->right = e->right;                // index
                 a->args.push_back(parse_expr());    // value
+                return a;
+            }
+            if (e->type == NodeT::Member) {
+                // a.b = v   →   IndexAssign(a, "b", v)
+                eat(Tk::Eq);
+                auto a = make(NodeT::IndexAssign, ln);
+                a->left = e->left;
+                auto key = make(NodeT::Str, ln);
+                key->str_val = e->str_val;
+                a->right = key;
+                a->args.push_back(parse_expr());
                 return a;
             }
         }
@@ -634,7 +852,8 @@ struct Parser {
     }
     static bool callable_node(const ExprPtr& e) {
         return e->type == NodeT::Id || e->type == NodeT::Call ||
-               e->type == NodeT::Index || e->type == NodeT::FuncDecl;
+               e->type == NodeT::Index || e->type == NodeT::Member ||
+               e->type == NodeT::FuncDecl;
     }
     ExprPtr parse_postfix() {
         auto l = parse_primary();
@@ -658,6 +877,13 @@ struct Parser {
                 idx->right = parse_expr();
                 eat(Tk::RBrack);
                 l = idx;
+            } else if (check(Tk::Dot)) {
+                int ln = cur().line;
+                eat(Tk::Dot);
+                auto m = make(NodeT::Member, ln);
+                m->left = l;
+                m->str_val = eat(Tk::Id).text;
+                l = m;
             } else break;
         }
         return l;
@@ -695,7 +921,29 @@ struct Parser {
             eat(Tk::RBrack);
             return e;
         }
-        if (check(Tk::Func)) return parse_func_expr();
+        if (check(Tk::LBrace)) {
+            // Dict literal: {} or {key: value, ...}
+            eat(Tk::LBrace);
+            auto e = make(NodeT::DictLit, ln);
+            while (!check(Tk::RBrace)) {
+                std::string key;
+                if (check(Tk::Id))       key = eat(Tk::Id).text;
+                else if (check(Tk::Str)) key = eat(Tk::Str).text;
+                else err(*file, cur().line,
+                         std::string("expected dict key (identifier or string), got '")
+                         + cur().text + "'");
+                eat(Tk::Colon);
+                e->params.push_back(key);
+                e->args.push_back(parse_expr());
+                if (!check(Tk::RBrace)) eat(Tk::Comma);
+            }
+            eat(Tk::RBrace);
+            return e;
+        }
+        if (check(Tk::Func)) {
+            // Anonymous-only in expression position.
+            return parse_func(/*allow_name=*/false, /*require_name=*/false);
+        }
         err(*file, ln, "unexpected '" + cur().text + "'");
     }
 };
@@ -705,12 +953,17 @@ struct Interpreter {
     EnvPtr global;
     int stack_depth = 0;
     int max_stack = 1000;
-    std::vector<std::string> call_stack;            // for Error::trace
-    YieldFn yield_fn;                               // cooperative-scheduling hook
-    std::vector<std::weak_ptr<Env>> tracked_envs;   // for cycle breaking at shutdown
+    int function_depth = 0;                          // for return-outside-function
+    int loop_depth = 0;                              // for break/continue-outside-loop
+    std::vector<std::string> call_stack;             // for Error::trace
+    YieldFn yield_fn;                                // cooperative-scheduling hook
+    std::vector<std::weak_ptr<Env>> tracked_envs;    // for cycle breaking at shutdown
+    std::unordered_set<std::string> loaded_files;    // load() memoization & cycle break
+    std::mt19937_64 rng;                             // single source of randomness
 
     Interpreter() {
-        std::srand((unsigned)std::time(nullptr));
+        rng.seed((uint64_t)std::chrono::high_resolution_clock::now()
+                              .time_since_epoch().count());
         global = make_env();
         register_builtins();
     }
@@ -772,6 +1025,9 @@ struct Interpreter {
         if (!v.is_closure() && !v.is_native())
             err(f, ln, std::string(nm) + " expects function");
     }
+    static void nd(const char* nm, const Value& v, int ln, const std::string& f) {
+        if (!v.is_dict()) err(f, ln, std::string(nm) + " expects dict");
+    }
 
     void reg(const char* name, NativeFn fn) {
         global->def(name, Value(std::move(fn)));
@@ -781,38 +1037,77 @@ struct Interpreter {
         global->def(name, Value(std::move(fn)));
     }
 
-    Value call_value(const Value& fn, const std::vector<Value>& args, int ln, const std::string& f) {
+    // ── call (with tail-call trampoline + signal containment) ────────
+    // The while loop both invokes a call and reuses the same C++ frame for
+    // tail calls (`return f(...)`) thrown from inside the body. Stray
+    // break/continue inside a closure body become errors instead of leaking
+    // into the caller's loops; loop_depth is reset to 0 on entry so a closure
+    // body cannot affect any enclosing loop's break/continue counts.
+    Value call_value(const Value& fn_in, const std::vector<Value>& args_in,
+                     int ln, const std::string& f) {
         yield();
-        if (fn.is_native()) return fn.as_native()(args, ln, f);
-        if (fn.is_closure()) {
-            auto& cl = fn.as_closure();
+        Value fn = fn_in;
+        std::vector<Value> args = args_in;
+        while (true) {
+            if (fn.is_native()) return fn.as_native()(args, ln, f);
+            if (!fn.is_closure()) err(f, ln, "not callable");
+            const Closure& cl = fn.as_closure();
             if (args.size() != cl.params.size())
                 err(f, ln, (cl.name.empty() ? "<anonymous>" : cl.name)
                     + " expects " + std::to_string(cl.params.size())
                     + " arg(s), got " + std::to_string(args.size()));
+
             std::string label = (cl.name.empty() ? std::string("<anonymous>") : cl.name)
                               + "() at " + f + ":" + std::to_string(ln);
             call_stack.push_back(label);
+            ++function_depth;
+            int saved_loop = loop_depth;
+            loop_depth = 0;
+
             auto local = make_env(cl.env);
             for (size_t i = 0; i < args.size(); ++i) local->def(cl.params[i], args[i]);
+
+            bool tail = false;
+            Value out = Value(nullptr);
+            bool returned = false;
             try {
                 exec_block(cl.body, local);
             } catch (ReturnSignal& rs) {
+                out = rs.val; returned = true;
+            } catch (TailCall& tc) {
+                fn = std::move(tc.fn);
+                args = std::move(tc.args);
+                tail = true;
+            } catch (BreakSignal&) {
                 call_stack.pop_back();
-                return rs.val;
+                --function_depth;
+                loop_depth = saved_loop;
+                err(f, ln, "break outside loop");
+            } catch (ContinueSignal&) {
+                call_stack.pop_back();
+                --function_depth;
+                loop_depth = saved_loop;
+                err(f, ln, "continue outside loop");
             } catch (Error& e) {
                 if (e.trace.empty())
                     e.trace.assign(call_stack.rbegin(), call_stack.rend());
                 call_stack.pop_back();
+                --function_depth;
+                loop_depth = saved_loop;
                 throw;
             } catch (...) {
                 call_stack.pop_back();
+                --function_depth;
+                loop_depth = saved_loop;
                 throw;
             }
+
             call_stack.pop_back();
-            return Value(nullptr);
+            --function_depth;
+            loop_depth = saved_loop;
+            if (tail) continue;                 // reuse the C++ frame
+            return returned ? out : Value(nullptr);
         }
-        err(f, ln, "not callable");
     }
 
     void register_builtins() {
@@ -822,6 +1117,7 @@ struct Interpreter {
             if (a[0].is_vec())  return Value((double)a[0].as_vec().size());
             if (a[0].is_str())  return Value((double)a[0].as_str().size());
             if (a[0].is_list()) return Value((double)a[0].as_list().size());
+            if (a[0].is_dict()) return Value((double)a[0].as_dict().size());
             err(f, ln, "len: unsupported type");
         });
 
@@ -833,9 +1129,9 @@ struct Interpreter {
                 return Value(Str(s));
             }
             if (a[0].is_list()) {
-                List l = a[0].as_list();             // copy out
+                List l = a[0].as_list();
                 std::reverse(l.begin(), l.end());
-                return Value(std::move(l));         // wrap in fresh ListPtr
+                return Value(std::move(l));
             }
             if (a[0].is_vec()) {
                 auto& v = a[0].as_vec();
@@ -886,7 +1182,7 @@ struct Interpreter {
             if (a[0].is_str() && a[1].is_str())
                 return Value(Str(a[0].as_str() + a[1].as_str()));
             if (a[0].is_list() && a[1].is_list()) {
-                List l = a[0].as_list();              // copy
+                List l = a[0].as_list();
                 auto& r = a[1].as_list();
                 l.insert(l.end(), r.begin(), r.end());
                 return Value(std::move(l));
@@ -899,7 +1195,12 @@ struct Interpreter {
                 for (size_t i = 0; i < vb.size(); ++i) r[va.size() + i] = vb[i];
                 return Value(r);
             }
-            err(f, ln, "concat expects two values of the same type (string, list, or vec)");
+            if (a[0].is_dict() && a[1].is_dict()) {
+                auto d = std::make_shared<DictMap>(a[0].as_dict());
+                for (auto& kv : a[1].as_dict()) (*d)[kv.first] = kv.second;
+                return Value(d);
+            }
+            err(f, ln, "concat expects two values of the same type (string, list, vec, or dict)");
         });
 
         // ── vec: reductions ───────────────────────────────────────────
@@ -947,7 +1248,17 @@ struct Interpreter {
         });
         reg("pow", [](auto& a, int ln, auto& f) -> Value {
             ck("pow", a, 2, ln, f); nv("pow", a[0], ln, f); nv("pow", a[1], ln, f);
-            return Value(std::pow(a[0].as_vec(), a[1].as_vec()));
+            // Broadcast explicitly: std::pow on valarrays of mismatched
+            // sizes is undefined behavior in libstdc++.
+            Vec va = a[0].as_vec(), vb = a[1].as_vec();
+            if (va.size() == 1 && vb.size() > 1) { Vec t(vb.size()); t = va[0]; va = t; }
+            if (vb.size() == 1 && va.size() > 1) { Vec t(va.size()); t = vb[0]; vb = t; }
+            if (va.size() != vb.size())
+                err(f, ln, "pow: vector size mismatch (" + std::to_string(va.size()) +
+                           " vs " + std::to_string(vb.size()) + ")");
+            Vec r(va.size());
+            for (size_t i = 0; i < va.size(); ++i) r[i] = std::pow(va[i], vb[i]);
+            return Value(r);
         });
         reg("sort", [](auto& a, int ln, auto& f) -> Value {
             ck("sort", a, 1, ln, f); nv("sort", a[0], ln, f);
@@ -977,19 +1288,25 @@ struct Interpreter {
             ck("ones", a, 1, ln, f); nv("ones", a[0], ln, f);
             return Value(Vec(1.0, (size_t)a[0].scalar()));
         });
-        reg("rand", [](auto& a, int ln, auto& f) -> Value {
+        reg("rand", [this](auto& a, int ln, auto& f) -> Value {
             int n = 1;
             if (!a.empty()) { nv("rand", a[0], ln, f); n = (int)a[0].scalar(); }
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
             Vec r(n);
-            for (int i = 0; i < n; ++i) r[i] = (double)std::rand() / (double)RAND_MAX;
+            for (int i = 0; i < n; ++i) r[i] = dist(rng);
             return Value(r);
+        });
+        reg("seed", [this](auto& a, int ln, auto& f) -> Value {
+            ck("seed", a, 1, ln, f); nv("seed", a[0], ln, f);
+            rng.seed((uint64_t)a[0].scalar());
+            return Value(nullptr);
         });
 
         // ── list operations ───────────────────────────────────────────
         reg("list", [](auto& a, int, auto&) -> Value {
             return Value(List(a.begin(), a.end()));
         });
-        // push: now mutates the list in place and returns it (reference semantics).
+        // push: mutates the list in place and returns it (reference semantics).
         reg("push", [](auto& a, int ln, auto& f) -> Value {
             ck("push", a, 2, ln, f);
             if (!a[0].is_list()) err(f, ln, "push expects list");
@@ -1016,27 +1333,94 @@ struct Interpreter {
             l.insert(l.begin() + i, a[2]);
             return a[0];
         });
+        // remove: polymorphic — list by index, dict by key.
         reg("remove", [](auto& a, int ln, auto& f) -> Value {
             ck("remove", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "remove expects list");
-            nv("remove", a[1], ln, f);
-            auto& l = a[0].as_list_mut();
-            int i = (int)a[1].scalar();
-            if (i < 0) i += (int)l.size();
-            if (i < 0 || i >= (int)l.size()) err(f, ln, "remove: index out of range");
-            Value v = std::move(l[i]);
-            l.erase(l.begin() + i);
-            return v;
+            if (a[0].is_list()) {
+                nv("remove", a[1], ln, f);
+                auto& l = a[0].as_list_mut();
+                int i = (int)a[1].scalar();
+                if (i < 0) i += (int)l.size();
+                if (i < 0 || i >= (int)l.size()) err(f, ln, "remove: index out of range");
+                Value v = std::move(l[i]);
+                l.erase(l.begin() + i);
+                return v;
+            }
+            if (a[0].is_dict()) {
+                ns("remove", a[1], ln, f);
+                auto& d = a[0].as_dict_mut();
+                auto it = d.find(a[1].as_str());
+                if (it == d.end()) return Value(nullptr);
+                Value v = std::move(it->second);
+                d.erase(it);
+                return v;
+            }
+            err(f, ln, "remove expects list or dict");
         });
         reg("copy", [](auto& a, int ln, auto& f) -> Value {
             ck("copy", a, 1, ln, f);
             if (a[0].is_list()) return Value(List(a[0].as_list()));
             if (a[0].is_vec())  return Value(Vec(a[0].as_vec()));
             if (a[0].is_str())  return Value(Str(a[0].as_str()));
+            if (a[0].is_dict()) return Value(std::make_shared<DictMap>(a[0].as_dict()));
             return a[0];
         });
 
-        // ── higher-order: map, filter, reduce, each ───────────────────
+        // ── dict operations ───────────────────────────────────────────
+        // dict()                — empty dict
+        // dict(list-of-pairs)   — build from list of [key, value] 2-element lists
+        reg("dict", [](auto& a, int ln, auto& f) -> Value {
+            auto d = std::make_shared<DictMap>();
+            if (a.empty()) return Value(d);
+            ck("dict", a, 1, ln, f);
+            if (!a[0].is_list()) err(f, ln, "dict expects a list of [key,value] pairs");
+            for (auto& el : a[0].as_list()) {
+                if (!el.is_list() || el.as_list().size() != 2)
+                    err(f, ln, "dict: each element must be [key,value]");
+                auto& pair = el.as_list();
+                if (!pair[0].is_str()) err(f, ln, "dict: keys must be strings");
+                (*d)[pair[0].as_str()] = pair[1];
+            }
+            return Value(d);
+        });
+        reg("keys", [](auto& a, int ln, auto& f) -> Value {
+            ck("keys", a, 1, ln, f); nd("keys", a[0], ln, f);
+            std::vector<std::string> ks;
+            for (auto& kv : a[0].as_dict()) ks.push_back(kv.first);
+            std::sort(ks.begin(), ks.end());
+            List out;
+            out.reserve(ks.size());
+            for (auto& k : ks) out.push_back(Value(Str(k)));
+            return Value(std::move(out));
+        });
+        reg("values", [](auto& a, int ln, auto& f) -> Value {
+            ck("values", a, 1, ln, f); nd("values", a[0], ln, f);
+            auto& d = a[0].as_dict();
+            std::vector<std::string> ks;
+            for (auto& kv : d) ks.push_back(kv.first);
+            std::sort(ks.begin(), ks.end());
+            List out;
+            out.reserve(ks.size());
+            for (auto& k : ks) out.push_back(d.at(k));
+            return Value(std::move(out));
+        });
+        reg("has", [](auto& a, int ln, auto& f) -> Value {
+            ck("has", a, 2, ln, f);
+            if (!a[0].is_dict()) err(f, ln, "has expects dict");
+            ns("has", a[1], ln, f);
+            return Value(a[0].as_dict().count(a[1].as_str()) ? 1.0 : 0.0);
+        });
+        reg("get", [](auto& a, int ln, auto& f) -> Value {
+            if (a.size() != 2 && a.size() != 3) err(f, ln, "get expects 2 or 3 args");
+            if (!a[0].is_dict()) err(f, ln, "get expects dict");
+            ns("get", a[1], ln, f);
+            auto& d = a[0].as_dict();
+            auto it = d.find(a[1].as_str());
+            if (it != d.end()) return it->second;
+            return a.size() == 3 ? a[2] : Value(nullptr);
+        });
+
+        // ── higher-order: map, filter, reduce, each, apply ────────────
         reg("map", [this](auto& a, int ln, auto& f) -> Value {
             ck("map", a, 2, ln, f);
             if (!a[0].is_list()) err(f, ln, "map expects list");
@@ -1140,12 +1524,45 @@ struct Interpreter {
             auto s = a[0].as_str();
             auto& from = a[1].as_str();
             auto& to = a[2].as_str();
+            if (from.empty()) return Value(Str(s));
             size_t p = 0;
             while ((p = s.find(from, p)) != std::string::npos) {
                 s.replace(p, from.size(), to);
                 p += to.size();
             }
             return Value(Str(s));
+        });
+
+        // format("hello {}, you have {} new", name, count)
+        // {{ and }} are escaped braces.
+        reg("format", [](auto& a, int ln, auto& f) -> Value {
+            if (a.empty()) err(f, ln, "format expects at least 1 arg");
+            ns("format", a[0], ln, f);
+            auto& fmt = a[0].as_str();
+            std::string out;
+            size_t arg_idx = 1;
+            for (size_t i = 0; i < fmt.size(); ++i) {
+                if (i + 1 < fmt.size() && fmt[i] == '{' && fmt[i+1] == '{') {
+                    out += '{'; ++i; continue;
+                }
+                if (i + 1 < fmt.size() && fmt[i] == '}' && fmt[i+1] == '}') {
+                    out += '}'; ++i; continue;
+                }
+                if (i + 1 < fmt.size() && fmt[i] == '{' && fmt[i+1] == '}') {
+                    if (arg_idx < a.size()) out += a[arg_idx++].repr();
+                    else out += "{}";
+                    ++i; continue;
+                }
+                out += fmt[i];
+            }
+            return Value(Str(out));
+        });
+
+        // out(args...) — write reprs to stdout with no separator and no newline.
+        reg("out", [](auto& a, int, auto&) -> Value {
+            for (auto& v : a) std::cout << v.repr();
+            std::cout.flush();
+            return Value(nullptr);
         });
 
         // ── regex ─────────────────────────────────────────────────────
@@ -1173,6 +1590,7 @@ struct Interpreter {
             if (a[0].is_vec())  return Value(Str("vec"));
             if (a[0].is_str())  return Value(Str("string"));
             if (a[0].is_list()) return Value(Str("list"));
+            if (a[0].is_dict()) return Value(Str("dict"));
             return Value(Str("func"));
         });
         reg("str", [](auto& a, int ln, auto& f) -> Value {
@@ -1252,15 +1670,16 @@ struct Interpreter {
             return Value((double)std::chrono::duration_cast<std::chrono::microseconds>(
                 t.time_since_epoch()).count() / 1e6);
         });
+        reg("sleep", [](auto& a, int ln, auto& f) -> Value {
+            ck("sleep", a, 1, ln, f); nv("sleep", a[0], ln, f);
+            double s = a[0].scalar();
+            if (s < 0) s = 0;
+            std::this_thread::sleep_for(std::chrono::duration<double>(s));
+            return Value(nullptr);
+        });
         reg("error", [](auto& a, int ln, auto& f) -> Value {
             ck("error", a, 1, ln, f);
             err(f, ln, a[0].repr());
-        });
-        reg("assert", [](auto& a, int ln, auto& f) -> Value {
-            if (a.empty()) err(f, ln, "assert expects at least 1 arg");
-            if (!a[0].truthy())
-                err(f, ln, "assertion failed" + (a.size() > 1 ? ": " + a[1].repr() : ""));
-            return Value(nullptr);
         });
 
         // ── character codes ───────────────────────────────────────────
@@ -1276,22 +1695,22 @@ struct Interpreter {
             return Value((double)(unsigned char)a[0].as_str()[0]);
         });
 
-        // ── shuffle: returns a shuffled copy (matches reverse/sort) ───
-        reg("shuffle", [](auto& a, int ln, auto& f) -> Value {
+        // ── shuffle: returns a shuffled copy ──────────────────────────
+        reg("shuffle", [this](auto& a, int ln, auto& f) -> Value {
             ck("shuffle", a, 1, ln, f);
             if (a[0].is_list()) {
                 List l = a[0].as_list();
                 for (size_t i = l.size(); i > 1; --i) {
-                    size_t j = (size_t)std::rand() % i;
-                    std::swap(l[i - 1], l[j]);
+                    std::uniform_int_distribution<size_t> dist(0, i - 1);
+                    std::swap(l[i - 1], l[dist(rng)]);
                 }
                 return Value(std::move(l));
             }
             if (a[0].is_vec()) {
                 Vec v = a[0].as_vec();
                 for (size_t i = v.size(); i > 1; --i) {
-                    size_t j = (size_t)std::rand() % i;
-                    std::swap(v[i - 1], v[j]);
+                    std::uniform_int_distribution<size_t> dist(0, i - 1);
+                    std::swap(v[i - 1], v[dist(rng)]);
                 }
                 return Value(v);
             }
@@ -1320,10 +1739,16 @@ struct Interpreter {
     }
 
     // ── broadcast binary op ───────────────────────────────────────────
-    Value vec_binop(const Value& a, const Value& b, const std::string& op, int ln, const std::string& f) {
-        if ((op == "==" || op == "!=") && (a.is_str() || b.is_str() || a.is_nil() || b.is_nil())) {
-            bool eq = a.repr() == b.repr();
-            return Value(op == "==" ? (eq ? 1.0 : 0.0) : (eq ? 0.0 : 1.0));
+    Value vec_binop(const Value& a, const Value& b, const std::string& op,
+                    int ln, const std::string& f) {
+        // Equality / inequality: scalar 0/1 via deep_eq for any non-(vec,vec)
+        // pair (mixed types, lists, dicts, strings, nil). Vec-vs-vec keeps
+        // element-wise broadcasting.
+        if (op == "==" || op == "!=") {
+            if (!a.is_vec() || !b.is_vec()) {
+                bool eq = Value::deep_eq(a, b);
+                return Value(op == "==" ? (eq ? 1.0 : 0.0) : (eq ? 0.0 : 1.0));
+            }
         }
         if (!a.is_vec() || !b.is_vec()) err(f, ln, "invalid operands for '" + op + "'");
         Vec va = a.as_vec(), vb = b.as_vec();
@@ -1347,9 +1772,13 @@ struct Interpreter {
         return Value(r);
     }
 
-    // ── lvalue resolution for indexed assignment ──────────────────────
+    // ── lvalue resolution for indexed/member assignment ───────────────
     // Returns a pointer to the Value at the leftmost target location.
-    // Handles arbitrarily nested Index expressions (a[i][j][k]).
+    // Handles arbitrarily nested Index / Member chains (a[i].b[j].c).
+    // Note: dict reads here DO NOT auto-create missing keys — that would
+    // leave dangling nil entries when a chain like a.b.c = v fails because
+    // a.b is missing. The terminal write through apply_index_assign is what
+    // creates new keys in dicts.
     Value* eval_lvalue(ExprPtr e, EnvPtr env) {
         if (e->type == NodeT::Id) {
             Value* p = env->find(e->str_val);
@@ -1359,24 +1788,43 @@ struct Interpreter {
         if (e->type == NodeT::Index) {
             Value* outer = eval_lvalue(e->left, env);
             Value idx_v = eval(e->right, env);
-            if (!idx_v.is_vec()) err(e->src_file(), e->line, "index must be numeric");
-            int i = (int)idx_v.scalar();
             if (outer->is_list()) {
+                if (!idx_v.is_vec()) err(e->src_file(), e->line, "list index must be numeric");
+                int i = (int)idx_v.scalar();
                 auto& l = outer->as_list_mut();
                 if (i < 0) i += (int)l.size();
                 if (i < 0 || i >= (int)l.size())
                     err(e->src_file(), e->line, "index out of range");
                 return &l[i];
             }
+            if (outer->is_dict()) {
+                if (!idx_v.is_str()) err(e->src_file(), e->line, "dict key must be string");
+                auto& d = outer->as_dict_mut();
+                auto it = d.find(idx_v.as_str());
+                if (it == d.end())
+                    err(e->src_file(), e->line, "no such key: " + idx_v.as_str());
+                return &it->second;
+            }
             err(e->src_file(), e->line, "cannot index this type for assignment");
+        }
+        if (e->type == NodeT::Member) {
+            Value* outer = eval_lvalue(e->left, env);
+            if (!outer->is_dict())
+                err(e->src_file(), e->line, "member access requires dict");
+            auto& d = outer->as_dict_mut();
+            auto it = d.find(e->str_val);
+            if (it == d.end())
+                err(e->src_file(), e->line, "no such member: " + e->str_val);
+            return &it->second;
         }
         err(e->src_file(), e->line, "invalid assignment target");
     }
 
-    void apply_index_assign(Value& container, const Value& idx, Value val, int ln, const std::string& f) {
-        if (!idx.is_vec()) err(f, ln, "index must be numeric");
-        int i = (int)idx.scalar();
+    void apply_index_assign(Value& container, const Value& idx, Value val,
+                            int ln, const std::string& f) {
         if (container.is_list()) {
+            if (!idx.is_vec()) err(f, ln, "list index must be numeric");
+            int i = (int)idx.scalar();
             auto& l = container.as_list_mut();
             if (i < 0) i += (int)l.size();
             if (i < 0 || i >= (int)l.size()) err(f, ln, "index out of range");
@@ -1384,12 +1832,19 @@ struct Interpreter {
             return;
         }
         if (container.is_vec()) {
+            if (!idx.is_vec()) err(f, ln, "vec index must be numeric");
+            int i = (int)idx.scalar();
             if (!val.is_vec() || val.as_vec().size() != 1)
-                err(f, ln, "vec element assignment requires scalar value");
+                err(f, ln, "vec element assignment requires a scalar");
             auto& v = std::get<Vec>(container.data);
             if (i < 0) i += (int)v.size();
             if (i < 0 || i >= (int)v.size()) err(f, ln, "index out of range");
             v[i] = val.scalar();
+            return;
+        }
+        if (container.is_dict()) {
+            if (!idx.is_str()) err(f, ln, "dict key must be string");
+            container.as_dict_mut()[idx.as_str()] = std::move(val);
             return;
         }
         err(f, ln, "cannot assign to indexed value of this type");
@@ -1419,10 +1874,25 @@ struct Interpreter {
             }
             return Value(v);
         }
+        case NodeT::DictLit: {
+            auto d = std::make_shared<DictMap>();
+            for (size_t i = 0; i < e->args.size(); ++i)
+                (*d)[e->params[i]] = eval(e->args[i], env);
+            return Value(d);
+        }
         case NodeT::BinOp:
             if (e->op == "and") return Value(eval(e->left, env).truthy() && eval(e->right, env).truthy() ? 1.0 : 0.0);
             if (e->op == "or")  return Value(eval(e->left, env).truthy() || eval(e->right, env).truthy() ? 1.0 : 0.0);
-            return vec_binop(eval(e->left, env), eval(e->right, env), e->op, ln, f);
+            {
+                // Force left-to-right evaluation. C++ does not guarantee
+                // argument evaluation order, so a naked
+                //   vec_binop(eval(left), eval(right), ...)
+                // can call right before left — visible whenever operand
+                // evaluation has side effects (e.g. `clock() <= clock()`).
+                Value l = eval(e->left, env);
+                Value r = eval(e->right, env);
+                return vec_binop(l, r, e->op, ln, f);
+            }
         case NodeT::UnaryOp:
             if (e->op == "-") {
                 auto v = eval(e->left, env);
@@ -1432,12 +1902,15 @@ struct Interpreter {
             if (e->op == "not") return Value(eval(e->left, env).truthy() ? 0.0 : 1.0);
             err(f, ln, "unknown unary");
         case NodeT::Call: {
-            // vars() — introspection, needs live environment
+            // vars() — sorted list of names visible from the current scope.
             if (e->left->type == NodeT::Id && e->left->str_val == "vars" && e->args.empty()) {
                 List names;
+                std::unordered_set<std::string> seen;
                 EnvPtr cur = env;
                 while (cur) {
-                    for (auto& kv : cur->vars) names.push_back(Value(Str(kv.first)));
+                    for (auto& kv : cur->vars)
+                        if (seen.insert(kv.first).second)
+                            names.push_back(Value(Str(kv.first)));
                     cur = cur->parent;
                 }
                 std::sort(names.begin(), names.end(), [](const Value& a, const Value& b) {
@@ -1445,7 +1918,18 @@ struct Interpreter {
                 });
                 return Value(std::move(names));
             }
-            // eval(string) — parse and execute in the current scope
+            // bindings() — visible name → value mapping as a dict.
+            if (e->left->type == NodeT::Id && e->left->str_val == "bindings" && e->args.empty()) {
+                auto d = std::make_shared<DictMap>();
+                EnvPtr cur = env;
+                while (cur) {
+                    for (auto& kv : cur->vars)
+                        if (d->find(kv.first) == d->end()) (*d)[kv.first] = kv.second;
+                    cur = cur->parent;
+                }
+                return Value(d);
+            }
+            // eval(string) — parse and execute in the current scope.
             if (e->left->type == NodeT::Id && e->left->str_val == "eval" && e->args.size() == 1) {
                 auto code = eval(e->args[0], env);
                 if (!code.is_str()) err(f, ln, "eval expects string");
@@ -1465,27 +1949,44 @@ struct Interpreter {
         case NodeT::Index: {
             auto obj = eval(e->left, env);
             auto idx = eval(e->right, env);
-            if (!idx.is_vec()) err(f, ln, "index must be numeric");
-            int i = (int)idx.scalar();
             if (obj.is_vec()) {
+                if (!idx.is_vec()) err(f, ln, "vec index must be numeric");
+                int i = (int)idx.scalar();
                 auto& v = obj.as_vec();
                 if (i < 0) i += (int)v.size();
                 if (i < 0 || i >= (int)v.size()) err(f, ln, "index out of range");
                 return Value(v[i]);
             }
             if (obj.is_list()) {
+                if (!idx.is_vec()) err(f, ln, "list index must be numeric");
+                int i = (int)idx.scalar();
                 auto& l = obj.as_list();
                 if (i < 0) i += (int)l.size();
                 if (i < 0 || i >= (int)l.size()) err(f, ln, "index out of range");
                 return l[i];
             }
             if (obj.is_str()) {
+                if (!idx.is_vec()) err(f, ln, "string index must be numeric");
+                int i = (int)idx.scalar();
                 auto& s = obj.as_str();
                 if (i < 0) i += (int)s.size();
                 if (i < 0 || i >= (int)s.size()) err(f, ln, "index out of range");
                 return Value(Str(1, s[i]));
             }
+            if (obj.is_dict()) {
+                if (!idx.is_str()) err(f, ln, "dict key must be string");
+                auto& d = obj.as_dict();
+                auto it = d.find(idx.as_str());
+                return it != d.end() ? it->second : Value(nullptr);
+            }
             err(f, ln, "cannot index this type");
+        }
+        case NodeT::Member: {
+            auto obj = eval(e->left, env);
+            if (!obj.is_dict()) err(f, ln, "member access requires dict");
+            auto& d = obj.as_dict();
+            auto it = d.find(e->str_val);
+            return it != d.end() ? it->second : Value(nullptr);
         }
         case NodeT::VarDecl: {
             auto v = eval(e->left, env);
@@ -1498,8 +1999,9 @@ struct Interpreter {
             return v;
         }
         case NodeT::IndexAssign: {
-            // Evaluate value first (matches typical right-to-left store ordering;
-            // also avoids mutating through a stale lvalue if value-eval errs).
+            // Evaluate value first (matches typical right-to-left store
+            // ordering and avoids mutating through a stale lvalue if the
+            // value-eval errs).
             Value val = eval(e->args[0], env);
             Value idx = eval(e->right, env);
             Value* target = eval_lvalue(e->left, env);
@@ -1512,6 +2014,9 @@ struct Interpreter {
             cl.params = e->params;
             cl.body = e->body;
             cl.env = env;
+            cl.origin = e.get();
+            // Statement-form named functions get bound into env. The parser
+            // ensures expression-form functions can never have names.
             if (!e->str_val.empty()) env->def(e->str_val, Value(cl));
             return Value(cl);
         }
@@ -1520,68 +2025,115 @@ struct Interpreter {
             else if (!e->args.empty()) eval(e->args[0], env);
             else if (e->right) exec_block(e->right->body, make_env(env));
             return Value(nullptr);
-        case NodeT::WhileStmt:
-            while (true) {
-                yield();
-                if (!eval(e->left, env).truthy()) break;
-                try { exec_block(e->body, make_env(env)); }
-                catch (BreakSignal&) { break; }
-                catch (ContinueSignal&) { continue; }
-            }
+        case NodeT::WhileStmt: {
+            ++loop_depth;
+            try {
+                while (true) {
+                    yield();
+                    if (!eval(e->left, env).truthy()) break;
+                    try { exec_block(e->body, make_env(env)); }
+                    catch (BreakSignal&) { break; }
+                    catch (ContinueSignal&) { continue; }
+                }
+            } catch (...) { --loop_depth; throw; }
+            --loop_depth;
             return Value(nullptr);
+        }
         case NodeT::ForStmt: {
             auto scope = make_env(env);
             eval(e->args[0], scope);
-            while (true) {
-                yield();
-                if (!eval(e->args[1], scope).truthy()) break;
-                try { exec_block(e->body, make_env(scope)); }
-                catch (BreakSignal&) { break; }
-                catch (ContinueSignal&) {}
-                eval(e->args[2], scope);
-            }
+            ++loop_depth;
+            try {
+                while (true) {
+                    yield();
+                    if (!eval(e->args[1], scope).truthy()) break;
+                    try { exec_block(e->body, make_env(scope)); }
+                    catch (BreakSignal&) { break; }
+                    catch (ContinueSignal&) {}
+                    eval(e->args[2], scope);
+                }
+            } catch (...) { --loop_depth; throw; }
+            --loop_depth;
             return Value(nullptr);
         }
         case NodeT::ForIn: {
             auto coll = eval(e->left, env);
             auto scope = make_env(env);
+            ++loop_depth;
             auto run_iter = [&](Value v) {
                 scope->vars[e->str_val] = std::move(v);
                 try { exec_block(e->body, make_env(scope)); }
                 catch (ContinueSignal&) {}
             };
-            if (coll.is_list()) {
-                // Snapshot the size so mutating the list mid-iteration doesn't
-                // produce surprising aliasing effects within this loop.
-                auto& l = coll.as_list();
-                size_t n = l.size();
-                for (size_t i = 0; i < n; ++i) {
-                    yield();
-                    try { run_iter(l[i]); } catch (BreakSignal&) { break; }
+            try {
+                if (coll.is_list()) {
+                    // Snapshot the size so mutating the list mid-iteration doesn't
+                    // produce surprising aliasing effects within this loop.
+                    auto& l = coll.as_list();
+                    size_t n = l.size();
+                    for (size_t i = 0; i < n; ++i) {
+                        yield();
+                        try { run_iter(l[i]); } catch (BreakSignal&) { break; }
+                    }
+                } else if (coll.is_vec()) {
+                    auto& v = coll.as_vec();
+                    for (size_t i = 0; i < v.size(); ++i) {
+                        yield();
+                        try { run_iter(Value(v[i])); } catch (BreakSignal&) { break; }
+                    }
+                } else if (coll.is_str()) {
+                    auto& s = coll.as_str();
+                    for (size_t i = 0; i < s.size(); ++i) {
+                        yield();
+                        try { run_iter(Value(Str(1, s[i]))); } catch (BreakSignal&) { break; }
+                    }
+                } else if (coll.is_dict()) {
+                    // Iterate keys in sorted order for stable, repeatable runs.
+                    std::vector<std::string> ks;
+                    for (auto& kv : coll.as_dict()) ks.push_back(kv.first);
+                    std::sort(ks.begin(), ks.end());
+                    for (auto& k : ks) {
+                        yield();
+                        try { run_iter(Value(Str(k))); } catch (BreakSignal&) { break; }
+                    }
+                } else {
+                    err(f, ln, "for-in requires list, vec, string, or dict");
                 }
-            } else if (coll.is_vec()) {
-                auto& v = coll.as_vec();
-                for (size_t i = 0; i < v.size(); ++i) {
-                    yield();
-                    try { run_iter(Value(v[i])); } catch (BreakSignal&) { break; }
-                }
-            } else if (coll.is_str()) {
-                auto& s = coll.as_str();
-                for (size_t i = 0; i < s.size(); ++i) {
-                    yield();
-                    try { run_iter(Value(Str(1, s[i]))); } catch (BreakSignal&) { break; }
-                }
-            } else {
-                err(f, ln, "for-in requires list, vec, or string");
-            }
+            } catch (...) { --loop_depth; throw; }
+            --loop_depth;
             return Value(nullptr);
         }
         case NodeT::ReturnStmt: {
+            if (function_depth == 0) err(f, ln, "return outside function");
+            // Tail-call: `return f(args...)` where the callee evaluates to a
+            // closure or native is converted to a TailCall signal so the
+            // enclosing call_value frame can be reused. Skip the special
+            // intrinsics handled inline above (vars, bindings, eval).
+            if (e->left && e->left->type == NodeT::Call) {
+                auto& c = *e->left;
+                bool is_intrinsic = c.left->type == NodeT::Id &&
+                    (c.left->str_val == "vars" ||
+                     c.left->str_val == "bindings" ||
+                     c.left->str_val == "eval");
+                if (!is_intrinsic) {
+                    auto fnv = eval(c.left, env);
+                    if (fnv.is_closure() || fnv.is_native()) {
+                        std::vector<Value> aargs;
+                        aargs.reserve(c.args.size());
+                        for (auto& a : c.args) aargs.push_back(eval(a, env));
+                        throw TailCall{std::move(fnv), std::move(aargs)};
+                    }
+                }
+            }
             Value v = e->left ? eval(e->left, env) : Value(nullptr);
             throw ReturnSignal{v};
         }
-        case NodeT::BreakStmt:    throw BreakSignal{};
-        case NodeT::ContStmt:     throw ContinueSignal{};
+        case NodeT::BreakStmt:
+            if (loop_depth == 0) err(f, ln, "break outside loop");
+            throw BreakSignal{};
+        case NodeT::ContStmt:
+            if (loop_depth == 0) err(f, ln, "continue outside loop");
+            throw ContinueSignal{};
         case NodeT::PrintStmt: {
             for (size_t i = 0; i < e->args.size(); ++i) {
                 if (i) std::cout << ' ';
@@ -1590,12 +2142,49 @@ struct Interpreter {
             std::cout << '\n';
             return Value(nullptr);
         }
+        case NodeT::AssertStmt: {
+            Value v = eval(e->left, env);
+            if (!v.truthy()) {
+                std::string msg = "assertion failed: " + e->str_val;
+                if (!e->args.empty()) {
+                    Value extra = eval(e->args[0], env);
+                    msg += " — " + extra.repr();
+                }
+                err(f, ln, msg);
+            }
+            return Value(nullptr);
+        }
+        case NodeT::TryCatch: {
+            try {
+                exec_block(e->body, make_env(env));
+            } catch (Error& err_obj) {
+                auto catch_scope = make_env(env);
+                auto d = std::make_shared<DictMap>();
+                (*d)["message"] = Value(Str(err_obj.msg));
+                (*d)["file"]    = Value(Str(err_obj.file));
+                (*d)["line"]    = Value((double)err_obj.line);
+                List trace_list;
+                for (auto& t : err_obj.trace) trace_list.push_back(Value(Str(t)));
+                (*d)["trace"]   = Value(std::move(trace_list));
+                catch_scope->def(e->str_val, Value(d));
+                exec_block(e->right->body, catch_scope);
+            }
+            // ReturnSignal, BreakSignal, ContinueSignal, TailCall are NOT
+            // caught here — they are control-flow primitives, not errors.
+            return Value(nullptr);
+        }
         case NodeT::LoadStmt: {
             auto fn = eval(e->left, env);
             if (!fn.is_str()) err(f, ln, "load expects string");
             auto resolved = resolve_load(fn.as_str(), f);
             if (!fs::exists(resolved)) err(f, ln, "cannot find '" + fn.as_str() + "'");
-            run_file(resolved.string(), env);
+            std::string canon = fs::weakly_canonical(resolved).string();
+            // Memoize: each canonical path is loaded at most once. This both
+            // breaks cycles (recursive loads see the path already-loaded) and
+            // avoids re-running modules already in scope.
+            if (loaded_files.insert(canon).second) {
+                run_file(canon, env);
+            }
             return Value(nullptr);
         }
         case NodeT::Block:
@@ -1619,13 +2208,44 @@ struct Interpreter {
         auto stmts = parser.parse_program();
         exec_block(stmts, env);
     }
+    // REPL-flavored runner: returns the final value and a flag indicating
+    // whether the last statement was an "expression" worth echoing.
+    struct LastResult { Value value; bool printable = false; };
+    LastResult run_source_repl(const std::string& src, const std::string& fname, EnvPtr env) {
+        Lexer lex(src, fname);
+        auto toks = lex.tokenize();
+        Parser parser(std::move(toks), fname);
+        auto stmts = parser.parse_program();
+        LastResult lr;
+        for (size_t i = 0; i < stmts.size(); ++i) {
+            yield();
+            Value v = eval(stmts[i].expr, env);
+            if (i + 1 == stmts.size()) {
+                NodeT t = stmts[i].expr->type;
+                bool is_expr =
+                    t == NodeT::Num || t == NodeT::Str || t == NodeT::Id ||
+                    t == NodeT::BinOp || t == NodeT::UnaryOp ||
+                    t == NodeT::Call || t == NodeT::Index || t == NodeT::Member ||
+                    t == NodeT::VecLit || t == NodeT::DictLit;
+                lr.value = v;
+                lr.printable = is_expr && !v.is_nil();
+            }
+        }
+        return lr;
+    }
     void run_file(const std::string& fname, EnvPtr env) {
         std::ifstream f(fname);
         if (!f) throw std::runtime_error("cannot open " + fname);
         std::ostringstream ss; ss << f.rdbuf();
         run_source(ss.str(), fs::weakly_canonical(fs::path(fname)).string(), env);
     }
-    void run_file(const std::string& fname) { run_file(fname, global); }
+    void run_file(const std::string& fname) {
+        // Top-level entry: register this path so any later `load` of the
+        // same file becomes a no-op (matches the load() memoization rule).
+        std::string canon = fs::weakly_canonical(fs::path(fname)).string();
+        loaded_files.insert(canon);
+        run_file(canon, global);
+    }
 
     void repl() {
         std::string input;
@@ -1648,10 +2268,13 @@ struct Interpreter {
             }
             if (depth > 0 || in_str) continue;
             try {
-                run_source(input, "<repl>", global);
+                auto lr = run_source_repl(input, "<repl>", global);
+                if (lr.printable) std::cout << lr.value.repr() << '\n';
             } catch (std::exception& e) {
                 std::cerr << "error: " << e.what() << '\n';
                 call_stack.clear();
+                function_depth = 0;
+                loop_depth = 0;
             }
             input.clear();
         }
@@ -1661,4 +2284,3 @@ struct Interpreter {
 } // namespace flux
 
 #endif // FLUX_H
-

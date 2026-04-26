@@ -1,360 +1,632 @@
-# ══════════════════════════════════════════════════════════════════════
-# test_core.flux — exhaustive tests for Flux core (flux.h)
-# ══════════════════════════════════════════════════════════════════════
+# test_core.flux
+# Comprehensive test of every Flux core feature: operators, builtins,
+# control flow, closures, dicts, errors. Reports passed/failed counts.
 
-var pass = 0
-var fail = 0
+# ── Test framework ────────────────────────────────────────────────────
+var passed = 0
+var failed = 0
+var failures = list()
 
-func check (name, got, expected) {
-    if (str(got) == str(expected)) {
-        pass = pass + 1
+func ok(name, cond) {
+    if (cond) {
+        passed = passed + 1
     } else {
-        print "FAIL:" name "— got" str(got) "expected" str(expected)
-        fail = fail + 1
+        failed = failed + 1
+        push(failures, name)
     }
 }
 
-# ── constants ──────────────────────────────────────────────────────────
-
-check("true",  true, 1)
-check("false", false, 0)
-check("nil",   str(nil), "nil")
-check("pi",    pi > 3.14, 1)
-check("e",     e > 2.71,  1)
-check("inf",   inf > 999999, 1)
-
-# ── var and assignment ─────────────────────────────────────────────────
-
-var x = 42
-check("var", x, 42)
-x = 100
-check("assign", x, 100)
-
-# ── arithmetic (scalar = vec of size 1) ────────────────────────────────
-
-check("add",  3 + 4, 7)
-check("sub",  10 - 3, 7)
-check("mul",  6 * 7, 42)
-check("div",  20 / 4, 5)
-check("mod",  17 % 5, 2)
-check("negate", -5, -5)
-check("precedence", 2 + 3 * 4, 14)
-check("parens", (2 + 3) * 4, 20)
-check("float", .5 + .5, 1)
-
-# ── comparison ─────────────────────────────────────────────────────────
-
-check("eq",  5 == 5, 1)
-check("neq", 5 != 3, 1)
-check("lt",  3 < 5, 1)
-check("gt",  5 > 3, 1)
-check("le",  3 <= 3, 1)
-check("ge",  5 >= 5, 1)
-
-# ── string equality ───────────────────────────────────────────────────
-
-check("str_eq", "hello" == "hello", 1)
-check("str_neq", "a" != "b", 1)
-check("nil_eq", nil == nil, 1)
-check("nil_neq", nil != "x", 1)
-
-# ── logic ──────────────────────────────────────────────────────────────
-
-check("and_tt", 1 and 1, 1)
-check("and_tf", 1 and 0, 0)
-check("or_tf",  0 or 1, 1)
-check("or_ff",  0 or 0, 0)
-check("not_t",  not 1, 0)
-check("not_f",  not 0, 1)
-
-# ── vectors ────────────────────────────────────────────────────────────
-
-var v = [1, 2, 3, 4, 5]
-check("vec_literal", str(v), "[1, 2, 3, 4, 5]")
-check("vec_index", v[0], 1)
-check("vec_neg_index", v[-1], 5)
-check("vec_add", str([1,2] + [3,4]), "[4, 6]")
-check("vec_sub", str([5,5] - [1,2]), "[4, 3]")
-check("vec_mul", str([2,3] * [4,5]), "[8, 15]")
-check("vec_div", str([10,20] / [2,5]), "[5, 4]")
-check("vec_broadcast_add", str([1,2,3] + 10), "[11, 12, 13]")
-check("vec_broadcast_mul", str(2 * [1,2,3]), "[2, 4, 6]")
-
-# ── vec reductions ─────────────────────────────────────────────────────
-
-check("sum",  sum(v), 15)
-check("mean", mean(v), 3)
-check("min",  min(v), 1)
-check("max",  max(v), 5)
-
-# ── vec element-wise math ──────────────────────────────────────────────
-
-check("sqrt", sqrt(4), 2)
-check("abs",  abs(-3), 3)
-check("sin0", sin(0), 0)
-check("cos0", cos(0), 1)
-check("exp0", exp(0), 1)
-check("log1", log(1), 0)
-check("tan0", tan(0), 0)
-check("asin0", asin(0), 0)
-check("acos1", acos(1), 0)
-check("atan0", atan(0), 0)
-check("floor", floor(3.7), 3)
-check("ceil",  ceil(3.2), 4)
-check("round", round(3.5), 4)
-check("pow",   pow(2, 10), 1024)
-check("sqrt_vec", str(sqrt([4,9,16])), "[2, 3, 4]")
-
-# ── vec sort ───────────────────────────────────────────────────────────
-
-check("sort", str(sort([3,1,4,1,5])), "[1, 1, 3, 4, 5]")
-
-# ── vec constructors ──────────────────────────────────────────────────
-
-check("range1", str(range(5)), "[0, 1, 2, 3, 4]")
-check("range2", str(range(2, 5)), "[2, 3, 4]")
-check("range3", str(range(0, 1, 0.5)), "[0, 0.5]")
-check("zeros", str(zeros(3)), "[0, 0, 0]")
-check("ones",  str(ones(3)), "[1, 1, 1]")
-
-var r = rand(100)
-check("rand_len", len(r), 100)
-check("rand_bounds", min(r) >= 0 and max(r) <= 1, 1)
-var r1 = rand()
-check("rand_scalar", len(r1), 1)
-
-# ── strings ────────────────────────────────────────────────────────────
-
-var s = "hello world"
-check("str_index", s[0], "h")
-check("str_neg_index", s[-1], "d")
-check("str_len", len(s), 11)
-check("upper", upper("hello"), "HELLO")
-check("lower", lower("HELLO"), "hello")
-check("trim",  trim("  hi  "), "hi")
-check("find_hit", find("hello", "ll"), 2)
-check("find_miss", find("hello", "zz"), -1)
-check("substr", substr("hello world", 6, 5), "world")
-check("replace", replace("aabaa", "a", "x"), "xxbxx")
-check("split", str(split("a,b,c", ",")), "(a, b, c)")
-check("join", join(list("x","y","z"), "-"), "x-y-z")
-
-# ── concat (polymorphic: string, list, vec) ────────────────────────────
-
-check("concat_str", concat("hel", "lo"), "hello")
-check("concat_list", str(concat(list(1,2), list(3,4))), "(1, 2, 3, 4)")
-check("concat_vec", str(concat([1,2], [3,4])), "[1, 2, 3, 4]")
-
-# ── slice (polymorphic: string, list, vec) ─────────────────────────────
-
-check("slice_vec", str(slice([10,20,30,40,50], 1, 4)), "[20, 30, 40]")
-check("slice_vec_neg", str(slice([10,20,30,40,50], -3, -1)), "[30, 40]")
-check("slice_vec_full", str(slice([1,2,3], 0, 3)), "[1, 2, 3]")
-check("slice_vec_empty", str(slice([1,2,3], 2, 2)), "[]")
-check("slice_list", str(slice(list(1,2,3,4), 1, 3)), "(2, 3)")
-check("slice_str", slice("hello world", 0, 5), "hello")
-check("slice_str_neg", slice("hello", -3, 5), "llo")
-
-# ── regex ──────────────────────────────────────────────────────────────
-
-var m = match("age: 42", "([0-9]+)")
-check("match_hit", m[0], "42")
-check("match_group", m[1], "42")
-check("match_miss", str(match("hello", "[0-9]+")), "nil")
-
-# ── lists ──────────────────────────────────────────────────────────────
-
-var l = list(10, "two", 3.5)
-check("list_len", len(l), 3)
-check("list_index", l[0], 10)
-check("list_neg", l[-1], 3.5)
-check("list_push", str(push(list(1,2), 3)), "(1, 2, 3)")
-
-# ── polymorphic: len, reverse ──────────────────────────────────────────
-
-check("len_str", len("abc"), 3)
-check("len_vec", len([1,2,3]), 3)
-check("len_list", len(list(1,2,3)), 3)
-check("reverse_str", reverse("abc"), "cba")
-check("reverse_vec", str(reverse([1,2,3])), "[3, 2, 1]")
-check("reverse_list", str(reverse(list(1,2,3))), "(3, 2, 1)")
-
-# ── type / conversion ─────────────────────────────────────────────────
-
-check("type_scalar", type(42), "scalar")
-check("type_vec", type([1,2]), "vec")
-check("type_str", type("hi"), "string")
-check("type_list", type(list()), "list")
-check("type_nil", type(nil), "nil")
-check("type_func", type(check), "func")
-check("str_conv", str(42), "42")
-check("num_conv", num("3.14"), 3.14)
-check("vec_conv", str(vec(list(1,2,3))), "[1, 2, 3]")
-
-# ── functions and closures ─────────────────────────────────────────────
-
-func add (a, b) { return a + b }
-check("func_call", add(3, 4), 7)
-
-var f = add
-check("first_class", f(10, 20), 30)
-
-func make_adder (n) {
-    func adder (x) { return x + n }
-    return adder
+# Assert that `thunk` raises an Error (used for negative tests).
+func expect_err(name, thunk) {
+    try {
+        thunk()
+        failed = failed + 1
+        push(failures, format("{} (expected error, got value)", name))
+    } catch (e) {
+        passed = passed + 1
+    }
 }
-var add5 = make_adder(5)
-check("closure", add5(10), 15)
 
-var sq = func (x) { return x * x }
-check("anon_func", sq(7), 49)
-
-func iife_test () {
-    return func (x) { return x * 2 } (21)
+func section(label) {
+    out(format("\n── {} ", label))
+    var pad = 50 - len(label)
+    for (var i in range(pad)) { out("─") }
+    out("\n")
 }
-check("iife", iife_test(), 42)
 
-# ── higher-order ───────────────────────────────────────────────────────
+# ── Numeric literals & arithmetic ─────────────────────────────────────
+section("Numeric literals & arithmetic")
+ok("integer literal",     42 == 42)
+ok("float literal",       3.14 == 3.14)
+ok("negative literal",    -7 == -7)
+ok("scientific 1e3",      1e3 == 1000)
+ok("scientific 1.5e2",    1.5e2 == 150)
+ok("scientific 2.5e-1",   2.5e-1 == 0.25)
+ok("addition",            2 + 3 == 5)
+ok("subtraction",         10 - 7 == 3)
+ok("multiplication",      6 * 7 == 42)
+ok("division",            10 / 4 == 2.5)
+ok("modulo",              10 % 3 == 1)
+ok("unary minus",         -(-5) == 5)
+ok("precedence",          2 + 3 * 4 == 14)
+ok("parens override",     (2 + 3) * 4 == 20)
+ok("nested unary",        --5 == 5)
 
-var nums = list(1, 2, 3, 4, 5)
-check("map", str(map(nums, func (x) { return x * x })), "(1, 4, 9, 16, 25)")
-check("filter", str(filter(nums, func (x) { return x > 3 })), "(4, 5)")
-check("reduce", reduce(nums, func (a, b) { return a + b }, 0), 15)
+# ── Comparison ────────────────────────────────────────────────────────
+section("Comparison")
+ok("eq scalar",           5 == 5)
+ok("neq scalar",          5 != 6)
+ok("lt",                  3 < 5)
+ok("gt",                  5 > 3)
+ok("le equal",            5 <= 5)
+ok("le less",             4 <= 5)
+ok("ge equal",            5 >= 5)
+ok("ge greater",          6 >= 5)
+ok("cross-type 1==\"1\"", (1 == "1") == 0)
+ok("cross-type nil==0",   (nil == 0) == 0)
+ok("nil==nil",            (nil == nil) == 1)
+ok("string==string",      "foo" == "foo")
+ok("string!=string",      "foo" != "bar")
 
-var side = 0
-each(list(1, 2, 3), func (x) { side = side + x })
-check("each", side, 6)
+# ── Logical operators ─────────────────────────────────────────────────
+section("Logical operators")
+ok("and tt",              (1 and 1) == 1)
+ok("and tf",              (1 and 0) == 0)
+ok("or ft",               (0 or 1) == 1)
+ok("or ff",               (0 or 0) == 0)
+ok("not true",            (not 1) == 0)
+ok("not false",           (not 0) == 1)
+ok("not nil",             (not nil) == 1)
+ok("not empty str",       (not "") == 1)
+ok("not nonempty str",    (not "x") == 0)
+ok("not empty list",      (not list()) == 1)
+ok("not empty dict",      (not {}) == 1)
+ok("short-circuit and",   (0 and undef_xyz) == 0)
+ok("short-circuit or",    (1 or undef_xyz) == 1)
 
-# ── eval ───────────────────────────────────────────────────────────────
+# ── Strings ───────────────────────────────────────────────────────────
+section("Strings")
+ok("len",                 len("hello") == 5)
+ok("len empty",           len("") == 0)
+ok("index",               "hello"[0] == "h")
+ok("neg index",           "hello"[-1] == "o")
+ok("upper",               upper("hello") == "HELLO")
+ok("lower",               lower("WORLD") == "world")
+ok("trim leading",        trim("  hi") == "hi")
+ok("trim trailing",       trim("hi  ") == "hi")
+ok("trim both",           trim("  hi  ") == "hi")
+ok("trim empty",          trim("") == "")
+ok("trim all space",      trim("   ") == "")
+ok("substr",              substr("hello world", 6, 5) == "world")
+ok("find present",        find("hello world", "world") == 6)
+ok("find missing",        find("hello", "xyz") == -1)
+ok("replace",             replace("a-b-c", "-", "_") == "a_b_c")
+ok("replace none",        replace("abc", "x", "_") == "abc")
+ok("replace empty from",  replace("abc", "", "x") == "abc")
+ok("split",               split("a,b,c", ",") == list("a", "b", "c"))
+ok("split no sep",        split("abc", ",") == list("abc"))
+ok("join",                join(list("a", "b", "c"), "-") == "a-b-c")
+ok("concat strings",      concat("foo", "bar") == "foobar")
+ok("reverse string",      reverse("abc") == "cba")
+ok("slice string",        slice("hello", 1, 4) == "ell")
+ok("slice neg",           slice("hello", -3, 5) == "llo")
+ok("char",                char(65) == "A")
+ok("char roundtrip",      asc(char(126)) == 126)
+ok("escape \\n",          asc("\n") == 10)
+ok("escape \\t",          asc("\t") == 9)
+ok("escape \\r",          asc("\r") == 13)
+ok("escape \\\\",         asc("\\") == 92)
+ok("escape \\\"",         asc("\"") == 34)
 
-check("eval_expr", eval("2 + 3"), 5)
-check("eval_last", eval("1\n2\n3 + 4"), 7)
-eval("var eval_var = 42")
-check("eval_def", eval_var, 42)
-eval("func eval_fn (x) { return x * 10 }")
-check("eval_func", eval_fn(5), 50)
+# format
+ok("format basic",        format("hi {}", "Ada") == "hi Ada")
+ok("format multi",        format("{} + {} = {}", 1, 2, 3) == "1 + 2 = 3")
+ok("format escape {{",    format("{{x}}") == "{x}")
+ok("format short args",   format("{} {}", 1) == "1 {}")
+ok("format no slots",     format("plain") == "plain")
 
-# ── apply ──────────────────────────────────────────────────────────────
+# ── Vec — construction & ops ──────────────────────────────────────────
+section("Vec — construction")
+ok("literal len",         len([1, 2, 3, 4]) == 4)
+ok("index",               [1, 2, 3][0] == 1)
+ok("neg index",           [1, 2, 3][-1] == 3)
+ok("range stop",          range(5) == [0, 1, 2, 3, 4])
+ok("range start stop",    range(2, 5) == [2, 3, 4])
+ok("range start stop step", range(0, 10, 2) == [0, 2, 4, 6, 8])
+ok("range empty",         len(range(0)) == 0)
+ok("zeros",               zeros(3) == [0, 0, 0])
+ok("ones",                ones(4) == [1, 1, 1, 1])
+ok("vec from list",       vec(list(1, 2, 3)) == [1, 2, 3])
 
-func add3 (a, b, c) { return a + b + c }
-check("apply", apply(add3, list(10, 20, 30)), 60)
-check("apply_anon", apply(func (x, y) { return x * y }, list(6, 7)), 42)
-check("apply_empty", apply(func () { return 99 }, list()), 99)
+section("Vec — element-wise arithmetic")
+ok("scalar broadcast +",  sum([1, 2, 3] + 10) == 36)
+ok("element +",           sum([1, 2, 3] + [10, 20, 30]) == 66)
+ok("element -",           sum([10, 20, 30] - [1, 2, 3]) == 54)
+ok("element *",           sum([1, 2, 3] * [4, 5, 6]) == 32)
+ok("element /",           sum([10, 20, 30] / [2, 4, 5]) == 16)
+ok("element %",           sum([10, 11, 12] % 3) == 3)
+ok("element ==",          sum([1, 2, 3] == [1, 2, 4]) == 2)
+ok("element <",           sum([1, 2, 3] < [2, 2, 2]) == 1)
+ok("unary minus",         sum(-[1, 2, 3]) == -6)
 
-# ── if / else / else if ───────────────────────────────────────────────
+section("Vec — reductions & math")
+ok("sum",                 sum([1, 2, 3, 4]) == 10)
+ok("mean",                mean([2, 4, 6, 8]) == 5)
+ok("min",                 min([3, 1, 4, 1, 5, 9, 2, 6]) == 1)
+ok("max",                 max([3, 1, 4, 1, 5, 9, 2, 6]) == 9)
+ok("sort",                sort([3, 1, 2]) == [1, 2, 3])
+ok("reverse vec",         reverse([1, 2, 3]) == [3, 2, 1])
+ok("slice vec",           slice([1, 2, 3, 4, 5], 1, 4) == [2, 3, 4])
+ok("concat vec",          concat([1, 2], [3, 4]) == [1, 2, 3, 4])
+ok("sqrt",                sqrt([1, 4, 9])[2] == 3)
+ok("abs",                 sum(abs([-1, -2, 3])) == 6)
+ok("floor",               floor([1.7, 2.3, -0.5]) == [1, 2, -1])
+ok("ceil",                ceil([1.2, 2.8, -0.3]) == [2, 3, 0])
+ok("round",               round([1.4, 1.6, 2.5]) == [1, 2, 3])
+ok("pow",                 pow([2, 3, 4], 2) == [4, 9, 16])
+ok("pow elem 0",          pow([2, 3, 4], 2)[0] == 4)
+ok("pow elem 1",          pow([2, 3, 4], 2)[1] == 9)
+ok("pow elem 2",          pow([2, 3, 4], 2)[2] == 16)
+ok("exp(0)==1",           exp([0])[0] == 1)
+ok("log(e)≈1",            round(log([e]) * 1000) == 1000)
+ok("sin(0)",              sin([0])[0] == 0)
+ok("cos(0)",              cos([0])[0] == 1)
+ok("sin(pi)≈0",           round(sin([pi]) * 1e6) == 0)
+ok("asin(1)≈pi/2",        round(asin([1])[0] * 1000) == round(pi / 2 * 1000))
+ok("acos(0)≈pi/2",        round(acos([0])[0] * 1000) == round(pi / 2 * 1000))
+ok("atan(0)",             atan([0])[0] == 0)
+ok("tan(0)",              tan([0])[0] == 0)
 
-var branch = ""
-if (1 > 2) {
-    branch = "a"
-} else if (2 > 3) {
-    branch = "b"
-} else {
-    branch = "c"
-}
-check("if_else", branch, "c")
+# Vec mutation
+var mv = [10, 20, 30]
+mv[1] = 99
+ok("vec[i] = …",          mv[1] == 99)
+ok("vec mutation isolated", mv[0] == 10 and mv[2] == 30)
 
-# ── while / break / continue ──────────────────────────────────────────
+# ── Lists ─────────────────────────────────────────────────────────────
+section("Lists")
+ok("list construction",   len(list(1, "a", [1, 2])) == 3)
+ok("list len",            len(list(1, 2, 3)) == 3)
+ok("list len empty",      len(list()) == 0)
+ok("list index",          list("a", "b", "c")[1] == "b")
+ok("list neg index",      list(1, 2, 3)[-1] == 3)
+ok("list equality",       list(1, 2, 3) == list(1, 2, 3))
+ok("list inequality",     list(1, 2, 3) != list(1, 2, 4))
+ok("list nested",         list(1, list(2, 3), 4)[1] == list(2, 3))
+ok("list reverse",        reverse(list(1, 2, 3)) == list(3, 2, 1))
+ok("list slice",          slice(list(1, 2, 3, 4, 5), 1, 4) == list(2, 3, 4))
+ok("list concat",         concat(list(1, 2), list(3, 4)) == list(1, 2, 3, 4))
 
-var sum_w = 0
+var l1 = list(1, 2)
+push(l1, 3)
+ok("push mutates",        l1 == list(1, 2, 3))
+
+var l2 = list(1, 2, 3, 4)
+ok("pop returns last",    pop(l2) == 4)
+ok("pop shrinks",         l2 == list(1, 2, 3))
+
+var l3 = list(1, 2, 4)
+insert(l3, 2, 3)
+ok("insert mid",          l3 == list(1, 2, 3, 4))
+insert(l3, 0, 0)
+ok("insert head",         l3 == list(0, 1, 2, 3, 4))
+insert(l3, -1, 99)
+ok("insert neg index",    l3 == list(0, 1, 2, 3, 99, 4))
+
+var l4 = list(10, 20, 30, 40)
+ok("remove returns elem", remove(l4, 1) == 20)
+ok("remove shrinks",      l4 == list(10, 30, 40))
+
+# Reference vs copy semantics for lists
+var lo = list(1, 2, 3)
+var lr = lo
+push(lr, 4)
+ok("list shares ref",     lo == list(1, 2, 3, 4))
+
+var lc = copy(lo)
+push(lc, 99)
+ok("copy is independent", lo == list(1, 2, 3, 4))
+ok("copy has new elem",   lc == list(1, 2, 3, 4, 99))
+
+# Indexed assignment
+var li = list(10, 20, 30)
+li[1] = 99
+ok("list[i] = …",         li == list(10, 99, 30))
+
+# ── Higher-order ──────────────────────────────────────────────────────
+section("Higher-order functions")
+ok("map double",          map(list(1, 2, 3), func(x) { return x * 2 }) == list(2, 4, 6))
+ok("map identity",        map(list("a", "b"), func(x) { return x }) == list("a", "b"))
+ok("filter gt",           filter(list(1, 2, 3, 4, 5), func(x) { return x > 2 }) == list(3, 4, 5))
+ok("filter all",          filter(list(1, 2, 3), func(x) { return 1 }) == list(1, 2, 3))
+ok("filter none",         filter(list(1, 2, 3), func(x) { return 0 }) == list())
+ok("reduce sum",          reduce(list(1, 2, 3, 4), func(a, b) { return a + b }, 0) == 10)
+ok("reduce product",      reduce(list(1, 2, 3, 4), func(a, b) { return a * b }, 1) == 24)
+ok("reduce empty",        reduce(list(), func(a, b) { return a + b }, 42) == 42)
+ok("apply",               apply(func(a, b, c) { return a + b + c }, list(1, 2, 3)) == 6)
+
+var each_sum = 0
+each(list(1, 2, 3, 4), func(x) { each_sum = each_sum + x })
+ok("each side effects",   each_sum == 10)
+
+ok("each returns nil",    each(list(1), func(x) { return x }) == nil)
+
+# ── Dicts ─────────────────────────────────────────────────────────────
+section("Dicts — construction & access")
+ok("empty {}",            len({}) == 0)
+ok("literal member",      {a: 1, b: 2}.a == 1)
+ok("literal index",       {x: 1, y: 2}["y"] == 2)
+ok("string-key literal",  {"with space": 7}["with space"] == 7)
+ok("missing → nil",       {a: 1}.b == nil)
+ok("missing index → nil", {a: 1}["x"] == nil)
+ok("nested deep read",    {x: {y: {z: 42}}}.x.y.z == 42)
+ok("len",                 len({a: 1, b: 2, c: 3}) == 3)
+
+section("Dicts — assignment & mutation")
+var d = {name: "Ada"}
+d.age = 7
+ok("member assign new",   d.age == 7)
+d.age = 8
+ok("member assign upd",   d.age == 8)
+d["new key"] = 99
+ok("index assign str",    d["new key"] == 99)
+
+var nd = {x: {y: {z: 0}}}
+nd.x.y.z = 99
+ok("nested member set",   nd.x.y.z == 99)
+
+# Reference semantics
+var dr_a = {x: 1}
+var dr_b = dr_a
+dr_b.x = 99
+ok("dict shares ref",     dr_a.x == 99)
+
+var dc = copy(dr_a)
+dc.x = 0
+ok("dict copy independent", dr_a.x == 99 and dc.x == 0)
+
+section("Dicts — built-in operations")
+ok("has present",         has({a: 1, b: 2}, "a") == 1)
+ok("has missing",         has({a: 1}, "z") == 0)
+ok("get found",           get({a: "X"}, "a", "DEF") == "X")
+ok("get default",         get({a: "X"}, "z", "DEF") == "DEF")
+ok("get no default",      get({a: 1}, "z") == nil)
+ok("keys sorted",         keys({c: 1, a: 2, b: 3}) == list("a", "b", "c"))
+ok("values sorted-by-key", values({c: 1, a: 2, b: 3}) == list(2, 3, 1))
+ok("equality (any order)", {a: 1, b: 2} == {b: 2, a: 1})
+ok("structural eq",       {a: list(1, 2), b: {x: 1}} == {b: {x: 1}, a: list(1, 2)})
+ok("inequality",          {a: 1} != {a: 2})
+ok("size mismatch",       {a: 1, b: 2} != {a: 1})
+
+ok("concat right wins",   concat({a: 1, b: 2}, {b: 99, c: 3}).b == 99)
+ok("concat preserves a",  concat({a: 1}, {b: 2}).a == 1)
+
+var dr = {a: 1, b: 2, c: 3}
+ok("remove returns val",  remove(dr, "b") == 2)
+ok("remove drops key",    has(dr, "b") == 0)
+ok("remove missing → nil", remove({}, "x") == nil)
+
+ok("dict() empty",        len(dict()) == 0)
+ok("dict() from pairs",   dict(list(list("a", 1), list("b", 2))).a == 1)
+
+# ── Type & conversion ─────────────────────────────────────────────────
+section("Type & conversion")
+ok("type nil",            type(nil) == "nil")
+ok("type scalar",         type(42) == "scalar")
+ok("type vec",            type([1, 2, 3]) == "vec")
+ok("type string",         type("hi") == "string")
+ok("type list",           type(list(1, 2)) == "list")
+ok("type dict",           type({a: 1}) == "dict")
+ok("type closure",        type(func(x) { return x }) == "func")
+ok("type native",         type(len) == "func")
+ok("str of num",          str(42) == "42")
+ok("str of float",        str(3.5) == "3.5")
+ok("str of nil",          str(nil) == "nil")
+ok("str of vec",          str([1, 2, 3]) == "[1, 2, 3]")
+ok("str of list",         str(list(1, 2)) == "(1, 2)")
+ok("num parse int",       num("42") == 42)
+ok("num parse float",     num("3.14") == 3.14)
+ok("num parse neg",       num("-5") == -5)
+ok("num parse sci",       num("1.5e2") == 150)
+expect_err("num bad",     func() { return num("abc") })
+
+# ── Regex ─────────────────────────────────────────────────────────────
+section("Regex")
+ok("match present",       match("hello world", "world") != nil)
+ok("match absent",        match("hello", "xyz") == nil)
+var m = match("abc123", "([a-z]+)(\\d+)")
+ok("match group 0",       m[0] == "abc123")
+ok("match group 1",       m[1] == "abc")
+ok("match group 2",       m[2] == "123")
+expect_err("invalid regex", func() { return match("x", "(unclosed") })
+
+# ── Random (with seed) ────────────────────────────────────────────────
+section("Random")
+seed(42)
+var r1 = rand(5)
+seed(42)
+var r2 = rand(5)
+ok("seed reproducible",   r1 == r2)
+seed(1)
+var sh1 = shuffle(list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+seed(1)
+var sh2 = shuffle(list(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+ok("shuffle reproducible", sh1 == sh2)
+
+seed(7)
+var rv = rand(100)
+ok("rand range",          min(rv) >= 0 and max(rv) < 1)
+ok("rand default size",   len(rand()) == 1)
+
+# ── Constants ─────────────────────────────────────────────────────────
+section("Constants")
+ok("pi ≈ 3.14159",        round(pi * 100000) == 314159)
+ok("e  ≈ 2.71828",        round(e  * 100000) == 271828)
+ok("true == 1",           true == 1)
+ok("false == 0",          false == 0)
+ok("inf > 1e300",         inf > 1e300)
+ok("nil is nil",          nil == nil)
+
+# ── Control flow ──────────────────────────────────────────────────────
+section("Control flow")
+var x = 10
+if (x > 5) { x = x + 1 }
+ok("if true branch",      x == 11)
+
+if (x < 5) { x = 0 } else { x = x + 1 }
+ok("if else branch",      x == 12)
+
+if (x < 0) { x = -1 } else if (x < 100) { x = 50 } else { x = 999 }
+ok("else if",             x == 50)
+
+var w = 0
 var i = 0
-while (i < 10) {
-    i = i + 1
-    if (i == 5) { break }
-    sum_w = sum_w + i
+while (i < 5) { w = w + i  i = i + 1 }
+ok("while loop",          w == 10)
+
+var fs = 0
+for (var j = 0; j < 5; j = j + 1) { fs = fs + j }
+ok("c-style for",         fs == 10)
+
+var fis = 0
+for (var k in list(10, 20, 30)) { fis = fis + k }
+ok("for-in list",         fis == 60)
+
+var visum = 0
+for (var v in [1, 2, 3, 4]) { visum = visum + v }
+ok("for-in vec",          visum == 10)
+
+var cs = 0
+for (var c in "hello") { cs = cs + 1 }
+ok("for-in string",       cs == 5)
+
+var keys_seen = list()
+for (var dk in {a: 1, b: 2, c: 3}) { push(keys_seen, dk) }
+ok("for-in dict (sorted)", keys_seen == list("a", "b", "c"))
+
+var brk = 0
+for (var ii = 0; ii < 100; ii = ii + 1) {
+    if (ii == 5) { break }
+    brk = brk + 1
 }
-check("while_break", sum_w, 10)
+ok("break in for",        brk == 5)
 
-var sum_c = 0
-var j = 0
-while (j < 6) {
-    j = j + 1
-    if (j % 2 == 0) { continue }
-    sum_c = sum_c + j
+var cnt = 0
+for (var ii = 0; ii < 10; ii = ii + 1) {
+    if (ii % 2 == 0) { continue }
+    cnt = cnt + 1
 }
-check("while_continue", sum_c, 9)
+ok("continue in for",     cnt == 5)
 
-# ── for ────────────────────────────────────────────────────────────────
-
-var sum_f = 0
-for (var k = 1; k <= 5; k = k + 1) {
-    sum_f = sum_f + k
+# break/continue inside while
+var wb = 0
+while (wb < 100) {
+    if (wb >= 7) { break }
+    wb = wb + 1
 }
-check("for", sum_f, 15)
+ok("break in while",      wb == 7)
 
-# ── return ─────────────────────────────────────────────────────────────
-
-func early (n) {
-    if (n < 0) { return -1 }
-    return 1
-}
-check("return_early", early(-5), -1)
-check("return_normal", early(5), 1)
-
-# ── nested scopes ─────────────────────────────────────────────────────
-
-var outer = 10
-func scope_test () {
-    var inner = 20
-    return outer + inner
-}
-check("nested_scope", scope_test(), 30)
-
-# ── vars() introspection ──────────────────────────────────────────────
-
-# helper for vars tests
-func contains (lst, val) {
-    var idx = 0
-    while (idx < len(lst)) {
-        if (lst[idx] == val) { return true }
-        idx = idx + 1
+# Nested loops with break (only innermost breaks)
+var inner_breaks = 0
+for (var a in range(3)) {
+    for (var b in range(3)) {
+        if (b == 1) { break }
+        inner_breaks = inner_breaks + 1
     }
-    return false
 }
+ok("break inner only",    inner_breaks == 3)
 
-var all_names = vars()
-check("vars_has_pi", contains(all_names, "pi"), true)
-check("vars_has_check", contains(all_names, "check"), true)
-check("vars_has_x", contains(all_names, "x"), true)
+# ── Functions & closures ──────────────────────────────────────────────
+section("Functions & closures")
+func double_fn(x) { return x * 2 }
+ok("named func",          double_fn(7) == 14)
 
-func scoped_vars () {
-    var local_only = 99
-    var names = vars()
-    return contains(names, "local_only")
+var lam = func(x) { return x + 1 }
+ok("anon func",           lam(41) == 42)
+
+func multi(a, b, c) { return a + b * c }
+ok("multi args",          multi(1, 2, 3) == 7)
+
+func no_return() { var z = 5 }
+ok("no return = nil",     no_return() == nil)
+
+func bare_return() { return }
+ok("bare return = nil",   bare_return() == nil)
+
+# IIFE
+ok("IIFE",                (func(x) { return x + 1 })(41) == 42)
+
+# Closure capture
+func make_adder(n) { return func(x) { return x + n } }
+var add3 = make_adder(3)
+var add10 = make_adder(10)
+ok("closure 1",           add3(5) == 8)
+ok("closure 2",           add10(5) == 15)
+ok("closures independent", add3(5) == 8 and add10(5) == 15)
+
+# Closure with mutable state
+func make_counter() {
+    var n = 0
+    return func() { n = n + 1  return n }
 }
-check("vars_local", scoped_vars(), true)
+var c1 = make_counter()
+ok("counter 1",           c1() == 1)
+ok("counter 2",           c1() == 2)
+ok("counter 3",           c1() == 3)
 
-# ── I/O ────────────────────────────────────────────────────────────────
+var c2 = make_counter()
+ok("independent counters", c2() == 1 and c1() == 4)
 
-write("/tmp/flux_test_io.txt", "hello flux")
-check("write_read", read("/tmp/flux_test_io.txt"), "hello flux")
-append("/tmp/flux_test_io.txt", "!")
-check("append", read("/tmp/flux_test_io.txt"), "hello flux!")
+# Recursion + TCO
+func count_down(n) { if (n == 0) { return "ok" }  return count_down(n - 1) }
+ok("TCO 100k",            count_down(100000) == "ok")
 
-# ── system ─────────────────────────────────────────────────────────────
+func sum_to(n, acc) { if (n == 0) { return acc }  return sum_to(n - 1, acc + n) }
+ok("TCO sum_to 10k",      sum_to(10000, 0) == 50005000)
 
-check("exec", trim(exec("echo ok")), "ok")
-check("env", type(env("HOME")), "string")
-var t = clock()
-check("clock", t > 0, 1)
+# Mutual TCO
+func is_even(n) { if (n == 0) { return 1 }  return is_odd(n - 1) }
+func is_odd(n)  { if (n == 0) { return 0 }  return is_even(n - 1) }
+ok("mutual TCO even",     is_even(10000) == 1)
+ok("mutual TCO odd",      is_odd(10001) == 1)
 
-# ── load ───────────────────────────────────────────────────────────────
+# ── Errors & try/catch ────────────────────────────────────────────────
+section("Errors & try/catch")
+expect_err("undefined var",    func() { return undef_xyz })
+expect_err("call non-func",    func() { var n = 5  return n(1) })
+expect_err("list out of range", func() { return list(1, 2, 3)[10] })
+expect_err("vec size mismatch", func() { return [1, 2] + [1, 2, 3] })
+expect_err("string + num",     func() { return "a" + 1 })
+expect_err("neg of string",    func() { return -"hi" })
+expect_err("break at top",     func() { eval("break") })
+expect_err("continue at top",  func() { eval("continue") })
+expect_err("named func expr",  func() { eval("var f = func g() { return 1 }") })
+expect_err("multi dots",       func() { eval("var x = 1.2.3") })
+expect_err("dict key not str", func() { var d = {a: 1}  return d[5] })
+expect_err("nonexistent key write", func() { var d = {}  eval("d.a.b = 1") })
 
-write("/tmp/flux_loaded_module.flux", "var loaded_val = 999\n")
-load ("/tmp/flux_loaded_module.flux")
-check("load", loaded_val, 999)
+# `return` at top-level cannot be tested via a thunk: the thunk's call frame
+# raises function_depth so eval'd `return` would be valid. Test at top level.
+var return_top_caught = 0
+try {
+    eval("return 1")
+} catch (e) {
+    if (find(e.message, "return outside") >= 0) { return_top_caught = 1 }
+}
+ok("return at top",        return_top_caught == 1)
 
-# ── assert ─────────────────────────────────────────────────────────────
+# error() and the catch dict
+var ce = nil
+try { error("custom") } catch (e) { ce = e }
+ok("error() raises",      ce != nil)
+ok("error.message",       ce.message == "custom")
+ok("error.file string",   type(ce.file) == "string")
+ok("error.line scalar",   type(ce.line) == "scalar")
+ok("error.trace list",    type(ce.trace) == "list")
 
-assert(1 == 1, "basic assert")
-assert(true)
+# Error with stack trace
+func deep1() { error("from deep") }
+func deep2() { deep1() }
+func deep3() { deep2() }
+var de = nil
+try { deep3() } catch (e) { de = e }
+ok("traced error",        de.message == "from deep")
+ok("trace populated",     len(de.trace) >= 3)
 
-# ── summary ────────────────────────────────────────────────────────────
+# Try doesn't disturb function return
+func tries_then_returns() {
+    try { error("x") } catch (e) {}
+    return 99
+}
+ok("try preserves return", tries_then_returns() == 99)
 
+# Return inside try
+func returns_in_try() {
+    try { return 7 } catch (e) { return -1 }
+    return 0
+}
+ok("return inside try",   returns_in_try() == 7)
+
+# Assert message includes expression
+var amsg = nil
+try { assert(2 + 2 == 5) } catch (e) { amsg = e.message }
+ok("assert echoes expr",  find(amsg, "2 + 2 == 5") >= 0)
+
+var amsg2 = nil
+try { assert(0, "custom") } catch (e) { amsg2 = e.message }
+ok("assert custom msg",   find(amsg2, "custom") >= 0)
+
+# Stray break in closure called from a loop must not escape
+func bad_break() { break }
+var stray_caught = 0
+try {
+    for (var x in list(1)) { bad_break() }
+} catch (e) {
+    if (find(e.message, "break outside") >= 0) { stray_caught = 1 }
+}
+ok("stray break contained", stray_caught == 1)
+
+# ── I/O ───────────────────────────────────────────────────────────────
+section("I/O")
+write("test_io.tmp", "hello")
+ok("write→read",          read("test_io.tmp") == "hello")
+append("test_io.tmp", " world")
+ok("append",              read("test_io.tmp") == "hello world")
+write("test_io.tmp", 42)
+ok("write num as repr",   read("test_io.tmp") == "42")
+expect_err("read missing", func() { return read("nonexistent_xyz_42.tmp") })
+
+# ── System ────────────────────────────────────────────────────────────
+section("System")
+ok("clock scalar",        type(clock()) == "scalar")
+ok("clock positive",      clock() > 0)
+ok("clock monotonic",     clock() <= clock())
+sleep(0)
+ok("sleep returns nil",   sleep(0) == nil)
+ok("env returns str/nil", type(env("PATH")) == "string" or type(env("PATH")) == "nil")
+ok("env missing → nil",   env("DEFINITELY_NOT_SET_XYZ_42") == nil)
+ok("exec echo",           trim(exec("echo flux_test_42")) == "flux_test_42")
+
+# ── Introspection ─────────────────────────────────────────────────────
+section("Introspection")
+var bindings_snapshot = passed
+var b = bindings()
+ok("bindings is dict",    type(b) == "dict")
+ok("bindings has passed", has(b, "passed") == 1)
+ok("bindings snapshots",  b.passed == bindings_snapshot)
+
+var vs = vars()
+ok("vars is list",        type(vs) == "list")
+ok("vars has names",      len(vs) > 0)
+
+ok("eval simple",         eval("1 + 2") == 3)
+ok("eval multi-stmt",     eval("var ev_x = 99  ev_x") == 99)
+ok("eval defines in scope", ev_x == 99)
+
+# ── Block comments & escapes (round-trip via eval) ───────────────────
+section("Block comments")
+ok("inline /* */",        eval("var bc1 = /* tail */ 7  bc1") == 7)
+ok("multi-line /* */",    eval("var bc2 = /* a
+b
+c */ 3  bc2") == 3)
+ok("# comment",           eval("var bc3 = 5  # tail
+bc3") == 5)
+
+# ── Cleanup ───────────────────────────────────────────────────────────
+exec("rm -f test_io.tmp")
+
+# ── Summary ───────────────────────────────────────────────────────────
 print ""
-print "═══════════════════════════════════════════"
-print " test_core: " pass " passed, " fail " failed"
-print "═══════════════════════════════════════════"
-
-if (fail > 0) {
-    error("tests failed")
+print "════════════════════════════════════════════════════"
+print format("Total: {} passed, {} failed", passed, failed)
+print "════════════════════════════════════════════════════"
+if (failed > 0) {
+    print "Failures:"
+    for (var msg in failures) {
+        out("  • ")
+        out(msg)
+        out("\n")
+    }
+    exit(1)
 }
+print "All tests passed."

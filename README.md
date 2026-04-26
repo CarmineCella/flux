@@ -1,371 +1,560 @@
 # Flux
 
-A small, embeddable scripting language for numerical computation and algorithmic work.
-Flux fits in a single C++17 header (~715 lines) with no external dependencies, compiles
-in under a second, and runs either as a REPL or as a file interpreter.
+A small, embeddable scripting language in a single C++17 header.
 
-## Quick start
-
-```bash
-make                # compile
-make test           # run tests
-make install        # install binary + stdlib to ~/.flux
-./flux              # open REPL
-./flux script.flux  # run a script
-```
-
-## Command line
-
-```
-flux [options] [files...]
-```
-
-| Option | Description |
-|---|---|
-| `--i`, `-i` | Enter the REPL after running all files, keeping the environment intact. Useful for loading libraries and then exploring interactively — the same pattern as `python -i`. |
-| `--stack n`, `-s n` | Set the maximum eval recursion depth (default: 1000). A depth of 1000 supports roughly 200 nested function calls. |
-| `--args ...` | Everything after `--args` is collected into `__argv`, a list of strings accessible from Flux code. |
-| `--help`, `-h` | Print usage information. |
-
-If no files are given, Flux starts the REPL directly. If files are given without `--i`,
-they are executed and Flux exits.
-
-### Examples
-
-```bash
-# Run a script
-flux compute.flux
-
-# Run a script then drop into REPL with all definitions available
-flux --i mylib.flux
-
-# Pass arguments to a script
-flux process.flux --args input.csv output.csv --verbose
-
-# Limit recursion depth for untrusted code
-flux --stack 100 untrusted.flux
-```
-
-Accessing command line arguments from Flux:
-
-```python
-# __argv is always defined (empty list if no --args)
-if (len(__argv) > 0) {
-    print "first arg:" __argv[0]
-}
-```
-
-## The REPL
-
-The Flux REPL supports multi-line input. When you type an incomplete expression —
-an unclosed `{`, `(`, `[`, or string — the prompt changes from `>>` to `..` and
-keeps reading until everything is balanced.
-
-```
->> func fib (n) {
-..     if (n <= 1) { return n }
-..     return fib(n - 1) + fib(n - 2)
-.. }
->> print fib(10)
-55
-```
-
-Type `quit` or `exit` to leave the REPL.
-
-## Design
-
-Flux has four value types, all first-class:
-
-- **Scalars and vectors** — backed by `std::valarray<double>`. A scalar is simply a
-  vector of size 1. All arithmetic operators (`+ - * / %`) and math functions
-  (`sin`, `sqrt`, `exp`, ...) broadcast element-wise, so `[1,2,3] * 10` and
-  `sqrt([4,9,16])` work without loops.
-
-- **Strings** — immutable, with indexing, slicing, regex matching, and the usual
-  manipulation functions (`split`, `join`, `find`, `replace`, `upper`, `lower`, `trim`).
-  String concatenation uses `concat()`, keeping the `+` operator strictly numeric.
-
-- **Lists** — heterogeneous ordered collections, created with `list(...)`. Lists
-  are immutable by convention: `push()` returns a new list. Higher-order functions
-  (`map`, `filter`, `reduce`, `each`) operate on lists.
-
-- **Functions** — first-class closures with lexical scoping. Functions can be
-  anonymous, passed as arguments, returned from other functions, and stored in
-  variables. The environment chain uses `std::shared_ptr` for proper static scoping.
-
-Internally, all values are held in a `std::variant<Vec, Str, List, Closure, NativeFn, nullptr_t>`.
-
-## Syntax overview
-
-```python
-# comments start with #
-var x = 42
-var v = [1, 2, 3, 4, 5]
-var s = "hello"
-var l = list(1, "two", [3])
-
-func add (a, b) {
-    return a + b
-}
-
-# anonymous functions
-var sq = func (x) { return x * x }
-
-# print is a special form — no parentheses, variadic
-print "sum:" add(x, 10) "vec:" v
-
-if (x > 10) {
-    print "big"
-} else {
-    print "small"
-}
-
-while (x > 0) {
-    x = x - 1
-}
-
-for (var i = 0; i < 10; i = i + 1) {
-    print i
-}
-```
-
-## Closures and higher-order functions
-
-```python
-func make_counter () {
+```flux
+func make_counter() {
     var n = 0
-    func tick () {
-        n = n + 1
-        return n
-    }
-    return tick
+    return func() { n = n + 1  return n }
 }
 
 var c = make_counter()
-print c() c() c()   # 1 2 3
+print c() c() c()           # → 1 2 3
 
-var nums = list(1, 2, 3, 4, 5)
-print map(nums, func (x) { return x * x })        # (1, 4, 9, 16, 25)
-print filter(nums, func (x) { return x > 2 })     # (3, 4, 5)
-print reduce(nums, func (a, b) { return a + b }, 0) # 15
+# NumPy-ish vec with broadcasting
+print sum(sqrt(range(1, 101)))     # → 671.4629…
+
+# Dicts, closures, try/catch, tail calls — all in ~2300 lines of C++.
 ```
 
-## Vector operations
+Flux is a tree-walking interpreter aimed at being **easy to drop into a C++
+application** when you need a runtime scripting layer that's a bit more than a
+config file: dynamic typing with numeric arrays, dicts, closures, structured
+errors, and a cooperative-scheduling hook so a host program can interrupt or
+time-slice user code without changing the language.
 
-```python
-var a = [1, 2, 3]
-var b = [10, 20, 30]
+It is not designed to compete with V8 or LuaJIT on raw speed. It is designed to
+be **boring to embed, hard to crash, and pleasant to read**.
 
-print a + b           # [11, 22, 33]
-print a * 10          # [10, 20, 30]
-print sqrt([4, 9, 16]) # [2, 3, 4]
-print sum(a)          # 6
-print mean(a)         # 2
+---
 
-var r = range(0, 1, 0.1)   # [0, 0.1, 0.2, ..., 0.9]
-var noise = rand(1000)
-print "std dev:" sqrt(mean((noise - mean(noise)) * (noise - mean(noise))))
+## Contents
+
+- [Design](#design)
+- [Build & run](#build--run)
+- [Language tour](#language-tour)
+  - [Values and types](#values-and-types)
+  - [Operators](#operators)
+  - [Strings](#strings)
+  - [Vec — numeric arrays](#vec--numeric-arrays)
+  - [Lists](#lists)
+  - [Dicts](#dicts)
+  - [Control flow](#control-flow)
+  - [Functions and closures](#functions-and-closures)
+  - [Errors](#errors)
+  - [Modules](#modules)
+  - [Introspection](#introspection)
+- [Standard library](#standard-library)
+- [Embedding in C++](#embedding-in-c)
+- [Cooperative scheduling](#cooperative-scheduling)
+- [Gotchas](#gotchas)
+- [Project layout](#project-layout)
+
+---
+
+## Design
+
+- **Single header.** Drop `flux.h` into a project, `#include` it, you have a
+  language. No build system, no dependencies beyond a C++17 standard library.
+- **Tree-walking interpreter.** The implementation is straightforward and
+  hackable: ~600 lines of parser, ~600 of evaluator, ~700 of standard library.
+- **NumPy-flavored numerics via `std::valarray`.** Scalars are 1-element vecs;
+  the same operators broadcast across element-wise math.
+- **Lua-flavored composite types.** Lists are mutable, reference-shared. Dicts
+  use `{key: value}` syntax, support `.member` and `["key"]` access, and
+  iterate keys in sorted order.
+- **Real closures + tail-call optimization.** A `return f(args...)` in tail
+  position reuses the C++ call frame, so deep tail recursion is unbounded.
+- **Structured errors with stack traces.** `try { ... } catch (e) { ... }`
+  binds `e` as a dict containing `message`, `file`, `line`, and `trace`.
+- **Cooperative scheduling hook.** A host can install a `yield` callback that
+  fires at every loop iteration, block step, and function call — useful for
+  cancellation, time-slicing, or progress reporting from C++.
+- **Deterministic shutdown.** Closure↔environment cycles are broken at
+  interpreter destruction without leaking.
+
+Flux is intentionally minimal: doubles only (no integers), no bitwise ops, no
+async, no class system, no module-as-namespace. If you want all of that, you
+probably want a bigger language.
+
+---
+
+## Build & run
+
+Flux needs only a C++17 compiler.
+
+```bash
+# Compile a host that runs files or starts a REPL
+g++ -std=c++17 -O2 flux_main.cpp -o flux
+
+# Run a script
+./flux reference.flux
+
+# Or start the REPL
+./flux
+>> 1 + 2
+3
+>> var v = range(10)
+>> sum(v * v)
+285
+>> quit
 ```
 
-## Polymorphic builtins
+A minimal `flux_main.cpp`:
 
-These work on vectors, strings, and lists:
-
-| Function | Description |
-|---|---|
-| `len(x)` | Length / size |
-| `reverse(x)` | Reverse order |
-| `slice(x, start, stop)` | Sub-range (negative indices supported) |
-| `concat(a, b)` | Join two values of the same type |
-
-## String operations
-
-```python
-print upper("hello")                      # HELLO
-print split("a,b,c", ",")                 # (a, b, c)
-print join(list("x","y","z"), "-")        # x-y-z
-print replace("foo bar foo", "foo", "baz") # baz bar baz
-print match("age: 42", "([0-9]+)")        # (42, 42)
+```cpp
+#include "flux.h"
+int main(int argc, char** argv) {
+    flux::Interpreter interp;
+    try {
+        if (argc >= 2) interp.run_file(argv[1]);
+        else           interp.repl();
+    } catch (std::exception& e) {
+        std::cerr << "error: " << e.what() << '\n';
+        return 1;
+    }
+}
 ```
 
-## File I/O and path resolution
+---
 
-All file paths are resolved relative to the calling script's directory using
-`std::filesystem`, so `read("../data/input.csv")` works correctly regardless of
-the working directory.
+## Language tour
 
-```python
-write("output.txt", "hello")
-append("output.txt", " world")
-var content = read("output.txt")
+### Values and types
+
+There are seven value kinds: `nil`, `scalar` (a 1-element vec), `vec`, `string`,
+`list`, `dict`, `func`. The type tag for any value is reported by `type(x)`.
+
+```flux
+type(nil)        # "nil"
+type(42)         # "scalar"        — internally a Vec of size 1
+type([1, 2, 3])  # "vec"
+type("hi")       # "string"
+type(list(1,2))  # "list"
+type({a: 1})     # "dict"
+type(print)      # "func"
 ```
 
-## Module system
+Variables are introduced with `var name = expr` and reassigned with `name =
+expr` (which walks up the scope chain).
 
-`load("module.flux")` executes another file in the current environment. The search
-order is:
-
-1. Relative to the calling script's directory
-2. Each directory listed in the `FLUX_PATH` environment variable (`:` separated, `;` on Windows)
-3. `~/.flux/` as a fallback
-
-After `make install`, `load("stdlib.flux")` works from any script.
-
-## Introspection and metaprogramming
-
-```python
-# type introspection
-print type(42)         # scalar
-print type([1,2])      # vec
-print type("hello")    # string
-print type(list())     # list
-print type(nil)        # nil
-print type(sum)        # func
-
-# vars() — all names visible in the current scope
-var names = vars()
-print len(names) "symbols visible"
-
-# eval — execute code from strings at runtime
-print eval("2 + 3 * 4")           # 14
-eval("var x = 42")                 # defines x in current scope
-eval("func double(n) { return n * 2 }")
-
-# code generation
-var op = "*"
-var code = concat(concat("5 ", op), " 10")
-print eval(code)                   # 50
-
-# apply — call a function with arguments from a list
-func f(a, b, c) { return a + b + c }
-print apply(f, list(1, 2, 3))     # 6
+```flux
+var x = 1            # declare in current scope
+x = x + 1            # reassign — looks up the chain, doesn't shadow
 ```
 
-## Error handling and stack traces
+Constants: `pi`, `e`, `inf`, `nil`, `true` (= 1), `false` (= 0).
 
-Errors report the source file and line number. When an error occurs inside
-nested function calls, Flux prints a full call stack trace:
-
-```
-error: lib.flux:2: undefined: bad_var
-  in inner(), called from main.flux:6
-  in middle(), called from main.flux:10
-  in outer(), called from main.flux:13
-```
-
-Anonymous functions appear as `<anonymous>()`. Cross-file calls show the correct
-source file at each frame.
-
-The `--stack` flag protects against infinite recursion:
+### Operators
 
 ```
-error: script.flux:1: stack overflow (depth 50)
-  in boom(), called from script.flux:1
-  in boom(), called from script.flux:2
+arithmetic    +  -  *  /  %                  (numeric)
+comparison    == != < > <= >=                (== / != are structural)
+logical       and  or  not                   (short-circuit and/or)
+unary         -  not                         (numeric / boolean)
+indexing      x[i]                           (vec, list, string, dict)
+member        x.k                            (dict)
+call          f(args...)
 ```
 
-## System interaction
+`==` and `!=` are **structural and recursive** — they walk into lists and
+dicts and compare element-by-element. Across types they always disagree, so
+`1 != "1"` and `nil != 0`.
 
-```python
-var output = exec("ls -la")    # run shell command, capture stdout
-var home = env("HOME")         # read environment variable
-var t = clock()                # high-resolution timer (seconds)
-assert(1 == 1, "sanity check") # abort with message if false
-error("stop here")             # raise an error with file:line
-exit(0)                        # terminate
+```flux
+list(1, 2, 3) == list(1, 2, 3)        # 1
+{a: 1, b: 2} == {b: 2, a: 1}          # 1 (order doesn't matter for dicts)
+1 == "1"                              # 0 (cross-type)
 ```
+
+For `vec == vec`, the result is element-wise (NumPy-style):
+
+```flux
+[1, 2, 3] == [1, 2, 4]                # [1, 1, 0]
+```
+
+A multi-element vec is **truthy iff every element is non-zero**. So
+`if (v == w) { ... }` reads as "all elements equal":
+
+```flux
+if ([1, 2, 3] == [1, 2, 3]) { print "all match" }     # prints
+if ([1, 2, 3] == [1, 2, 4]) { print "all match" }     # doesn't
+```
+
+### Strings
+
+Strings are byte sequences. Indexing is byte-based; iteration with `for c in s`
+yields one-byte strings (UTF-8 multibyte chars split). Standard escapes:
+`\n \t \r \0 \\ \"`. Block comments `/* ... */` and line comments `# ...` are
+both supported.
+
+```flux
+upper("hello")              # "HELLO"
+trim("  hi  ")              # "hi"
+substr("hello world", 6, 5) # "world"
+find("hello", "lo")         # 3
+replace("a-b-c", "-", "_")  # "a_b_c"
+split("a,b,c", ",")         # list("a", "b", "c")
+join(list("a","b"), "-")    # "a-b"
+concat("foo", "bar")        # "foobar"     — there is no `+` for strings
+"hello"[1]                  # "e"
+"hello"[-1]                 # "o"
+char(65)                    # "A"
+asc("A")                    # 65
+format("hi {}", "Ada")      # "hi Ada"     — `{}` is the placeholder
+```
+
+### Vec — numeric arrays
+
+Vecs are written with `[…]`. They support broadcast arithmetic, the standard
+math functions, and reductions. Vecs are **value-typed**: `var b = a` makes a
+copy.
+
+```flux
+var v = [1, 2, 3, 4]
+
+v + 10              # [11, 12, 13, 14]    — scalar broadcast
+v * v               # [1, 4, 9, 16]       — element-wise
+sum(v)              # 10
+mean(v)             # 2.5
+range(0, 10, 2)     # [0, 2, 4, 6, 8]
+zeros(3)            # [0, 0, 0]
+ones(3)             # [1, 1, 1]
+sqrt([1, 4, 9])     # [1, 2, 3]
+pow([1, 2, 3], 2)   # [1, 4, 9]
+sort([3, 1, 2])     # [1, 2, 3]
+sin([0, pi/2, pi])  # [0, 1, ~0]
+```
+
+Numeric scalars are a Vec of size 1 — that's how `2 + [1, 2, 3]` broadcasts.
+
+### Lists
+
+Lists hold any mix of values. Built with `list(...)`. **Reference-shared**:
+`var b = a` shares storage. Use `copy(a)` to detach.
+
+```flux
+var l = list(1, "two", [3, 4], {x: 5})
+
+push(l, 99)             # mutates: appends
+pop(l)                  # mutates: removes & returns last
+insert(l, 0, "head")    # mutates: insert at index
+remove(l, 2)            # mutates: remove at index, return removed
+l[0] = "FIRST"          # index assignment
+
+len(l)
+reverse(l)
+slice(l, 1, 3)
+concat(list(1,2), list(3,4))
+```
+
+### Dicts
+
+String-keyed maps. Literal syntax: `{key: value, key2: value2}`. Bare
+identifiers as keys are auto-stringified; quoted strings allow arbitrary keys.
+Member access uses `.k` for identifier keys, `["any string"]` for the rest.
+**Reference-shared**, like lists.
+
+```flux
+var d = {name: "Ada", age: 7, "with space": 42}
+
+d.name                  # "Ada"
+d["age"]                # 7
+d.missing               # nil   (missing keys read as nil)
+d.age = 8               # member assignment
+d["new"] = 99
+
+has(d, "name")          # 1
+get(d, "x", "default")  # "default"   — default if key missing
+keys(d)                 # sorted list of keys
+values(d)               # values in key-sorted order
+remove(d, "age")        # removes and returns the value
+len(d)
+
+# Iteration yields keys in sorted order (deterministic):
+for (var k in d) { print k d[k] }
+
+# Build from pairs:
+dict(list(list("a", 1), list("b", 2)))     # {a: 1, b: 2}
+
+# Concat merges (right wins):
+concat({a: 1, b: 2}, {b: 99})              # {a: 1, b: 99}
+```
+
+Nested writes work as long as the path exists:
+
+```flux
+var cfg = {db: {host: "localhost", port: 5432}}
+cfg.db.port = 9999      # ok — db exists
+cfg.x.y = 1             # error: no such member 'x' (no auto-vivification)
+```
+
+### Control flow
+
+```flux
+if (cond) { ... } else if (cond) { ... } else { ... }
+
+while (cond) { ... }
+
+for (var i = 0; i < 10; i = i + 1) { ... }
+
+for (var x in iterable) { ... }      # list, vec, string, dict (keys)
+
+break          # leaves the innermost loop
+continue       # next iteration
+```
+
+`break` and `continue` are loop-only; using them outside a loop is an error.
+A closure called from inside a loop cannot `break` the outer loop — that
+becomes an error too.
+
+### Functions and closures
+
+```flux
+# Statement-form: requires a name.
+func square(x) { return x * x }
+
+# Expression-form: anonymous only.
+var f = func(x) { return x * 2 }
+
+# Closures capture lexical scope by reference.
+func make_adder(n) { return func(x) { return x + n } }
+var add3 = make_adder(3)
+add3(5)            # 8
+```
+
+`return expr` returns; bare `return` returns `nil`; running off the end also
+returns `nil`. Arity is enforced (no varargs in user code).
+
+**Tail-call optimization.** A `return f(args...)` in tail position is converted
+into a frame-reuse jump, so any tail call (self or otherwise) runs in O(1) C++
+stack. The default non-tail recursion limit is 1000.
+
+```flux
+func sum_to(n, acc) {
+    if (n == 0) { return acc }
+    return sum_to(n - 1, acc + n)        # tail call — unbounded depth
+}
+sum_to(1000000, 0)
+```
+
+Mutual recursion via tail calls also works:
+
+```flux
+func is_even(k) { if (k == 0) { return 1 } return is_odd(k - 1) }
+func is_odd(k)  { if (k == 0) { return 0 } return is_even(k - 1) }
+is_even(100000)        # ok, no stack overflow
+```
+
+### Errors
+
+`error(msg)` raises. `try { ... } catch (e) { ... }` catches user errors
+(not `return`/`break`/`continue` — those remain control-flow primitives).
+`e` is bound to a dict:
+
+```flux
+{
+    message: "something failed",
+    file:    "/path/to/script.flux",
+    line:    42,
+    trace:   list("foo() at script.flux:30",
+                  "bar() at script.flux:25", ...)
+}
+```
+
+```flux
+try {
+    error("boom")
+} catch (e) {
+    print "caught:" e.message "at line" e.line
+}
+```
+
+`assert(expr [, msg])` raises an error if `expr` is falsy. The diagnostic
+includes a textual rendering of the asserted expression:
+
+```flux
+assert(2 + 2 == 5)     # → "assertion failed: 2 + 2 == 5"
+assert(0, "uh oh")     # → "assertion failed: 0 — uh oh"
+```
+
+### Modules
+
+`load("path.flux")` runs another file in the current scope. Loads are
+**memoized by canonical path** — loading the same file twice is a no-op,
+which also breaks circular loads.
+
+Search order:
+1. relative to the source file doing the `load`
+2. each entry in `$FLUX_PATH` (`:` on Unix, `;` on Windows)
+3. `~/.flux/` (or `%USERPROFILE%/.flux/` on Windows)
+
+### Introspection
+
+```flux
+vars()       # sorted list of names visible in the current scope
+bindings()   # dict {name: value, ...} of visible bindings
+eval(src)    # parse + execute src in the current scope; returns last value
+```
+
+`eval` runs in the **caller's** scope: it can read and write outer variables.
+
+```flux
+var dynamic = 0
+eval("dynamic = 7 * 6")
+print dynamic             # 42
+```
+
+---
 
 ## Standard library
 
-The file `stdlib.flux` (installed to `~/.flux/`) provides additional functions
-written in Flux itself:
+| Category   | Functions                                                       |
+|------------|------------------------------------------------------------------|
+| Polymorphic | `len`, `reverse`, `slice`, `concat`, `copy`                     |
+| Reductions | `sum`, `mean`, `min`, `max`                                      |
+| Element-wise math | `sqrt`, `abs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`, `log`, `floor`, `ceil`, `round`, `pow`, `sort` |
+| Vec constructors | `range`, `zeros`, `ones`, `vec`, `rand`, `seed`           |
+| List       | `list`, `push`, `pop`, `insert`, `remove`                        |
+| Dict       | `dict`, `keys`, `values`, `has`, `get`, `remove`                 |
+| Higher-order | `map`, `filter`, `reduce`, `each`, `apply`                     |
+| String     | `upper`, `lower`, `trim`, `split`, `join`, `substr`, `find`, `replace`, `format`, `out`, `char`, `asc` |
+| Type / cast | `type`, `str`, `num`, `vec`                                     |
+| Regex      | `match`                                                          |
+| I/O        | `read`, `write`, `append`, `input`                               |
+| System     | `clock`, `sleep`, `env`, `exec`, `exit`                          |
+| Errors     | `error`, `assert`                                                |
+| Random     | `rand`, `seed`, `shuffle`                                        |
+| Introspection | `type`, `vars`, `bindings`, `eval`                            |
+| Output     | `print` (newline + space-separated), `out` (no separator/newline), `format` (`{}` placeholders) |
 
-**List**: `head`, `last`, `tail`, `pop`, `slice`, `insert`, `remove`, `flatten`,
-`repeat`, `zip`, `enumerate`, `range_list`
+See `reference.flux` for one example of every function with expected output.
 
-**Search**: `contains`, `index_of`, `any`, `all`, `count`
+---
 
-**String**: `starts_with`, `ends_with`, `lpad`, `rpad`, `chars`, `match_all`
+## Embedding in C++
 
-**Math**: `clamp`, `lerp`, `sign`, `deg2rad`, `rad2deg`
+The interpreter is a single class. The minimum to get going:
 
-**Functional**: `compose`, `partial`, `apply`, `twice`
+```cpp
+#include "flux.h"
 
-**Sorting**: `sort_list` (custom comparator), `sort_by` (key function)
+flux::Interpreter interp;
+interp.run_file("script.flux");
+```
 
-**Dictionary**: `dict_new`, `dict_set`, `dict_get`, `dict_has`, `dict_keys`, `dict_values`
+To register a host-side function:
 
-## Core builtin reference
+```cpp
+interp.register_builtin("greet",
+    [](const std::vector<flux::Value>& args, int line, const std::string& file) {
+        if (args.size() != 1 || !args[0].is_str())
+            flux::err(file, line, "greet: expects one string");
+        return flux::Value(flux::Str("hello " + args[0].as_str()));
+    });
+```
 
-### Polymorphic
-`len`, `reverse`, `slice`, `concat`
+Now `greet("world")` works from Flux code.
 
-### Vector — reductions
-`sum`, `mean`, `min`, `max`
+To pass values back and forth:
 
-### Vector — element-wise
-`sqrt`, `abs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`, `log`,
-`floor`, `ceil`, `round`, `pow`, `sort`
+```cpp
+auto& global = *interp.global;
+global.def("config", flux::Value(flux::Str("/etc/myapp.conf")));
 
-### Vector — constructors
-`range(stop)`, `range(start, stop)`, `range(start, stop, step)`,
-`zeros(n)`, `ones(n)`, `rand()`, `rand(n)`
+flux::Value result = interp.eval(/* parsed expr */, interp.global);
+if (result.is_vec()) {
+    for (double x : result.as_vec()) { /* ... */ }
+}
+```
 
-### String
-`upper`, `lower`, `trim`, `split`, `join`, `substr`, `find`, `replace`
+Error handling: every error from Flux code throws `flux::Error`, which is a
+`std::exception` subclass exposing `.file`, `.line`, `.msg`, and `.trace`.
 
-### Regex
-`match(string, pattern)` — returns list of groups or `nil`
+---
 
-### List
-`list(...)`, `push(list, val)`
+## Cooperative scheduling
 
-### Higher-order
-`map(list, fn)`, `filter(list, fn)`, `reduce(list, fn, init)`, `each(list, fn)`,
-`apply(fn, args_list)`
+A host can install a `yield` callback that fires at every loop iteration, every
+block statement, and every function call. This is how to implement
+cancellation, time-slicing, or progress reporting without changing the
+language:
 
-### Type and conversion
-`type(x)`, `str(x)`, `num(string)`, `vec(list)`
+```cpp
+std::atomic<bool> stop_requested{false};
 
-### I/O
-`read(path)`, `write(path, data)`, `append(path, data)`
+interp.set_yield([&]{
+    if (stop_requested.load()) {
+        flux::err("<host>", 0, "interrupted");
+    }
+});
 
-### System
-`exec(cmd)`, `env(name)`, `exit(code?)`, `clock()`
+// On another thread:
+//   stop_requested = true;
+// — the running script halts cleanly with a normal Error at the next yield.
+```
 
-### Control
-`error(msg)`, `assert(cond, msg?)`
+Use cases: stopping runaway scripts, integrating with a real-time audio
+callback, gating script execution on a frame budget, or hooking up a progress
+bar.
 
-### Introspection
-`vars()` — list of all names in the current scope
-`eval(string)` — parse and execute code at runtime, returns last value
+---
 
-### Constants
-`pi`, `e`, `inf`, `nil`, `true`, `false`
+## Gotchas
 
-### Special variable
-`__argv` — list of strings passed via `--args` on the command line
+A short list of behaviors worth knowing:
 
-## Architecture
+- **Strings are byte sequences.** `len("é")` is 2 (UTF-8). Iteration splits
+  multibyte characters. There is no built-in codepoint API.
 
-The interpreter is a recursive-descent parser producing a shared-pointer AST,
-evaluated by a tree-walking interpreter. Each AST node carries its source file
-and line number for accurate cross-file error reporting. Environments are
-linked via `shared_ptr` for proper closure semantics with static scoping.
+- **Lists and dicts are reference-typed; vecs and strings are value-typed.**
+  `var b = a` shares storage for lists and dicts but copies for vecs and
+  strings. Use `copy(a)` to detach.
 
-A stack guard (RAII depth counter) protects against infinite recursion. Errors
-during function calls build a stack trace by catching and augmenting
-`std::runtime_error` as it unwinds through `call_value` frames.
+- **Vec assignment is by value, but `v[i] = x` mutates in place.** Two
+  separate operations.
 
-All file paths are resolved through `std::filesystem` relative to the calling
-script's directory, with `FLUX_PATH` and `~/.flux/` fallbacks for module loading.
+- **Multi-element vec truthiness is "all non-zero".** This makes
+  `if (v == w) { ... }` work intuitively, but it means `if ([1, 0, 1])` is
+  false. Use `if (sum(v) > 0)` for "any non-zero" semantics.
 
-## Requirements
+- **No string `+`.** Use `concat(a, b)` or `format("{}{}", a, b)`. (This is
+  intentional: the binary `+` path stays on the hot vec arithmetic case
+  without an extra type dispatch.)
 
-- C++17 compiler (GCC 8+, Clang 7+, MSVC 19.14+)
-- No external libraries
-- POSIX `popen` for `exec()` (available on all major platforms)
+- **Numbers are doubles.** No integer type, no bitwise ops. Indexing
+  truncates to int.
 
-## License
+- **`load` is memoized.** Re-loading the same file is a no-op. To genuinely
+  re-run a file, use `eval(read("path.flux"))`.
 
-MIT
+- **`eval` runs in the caller's scope** — it can both read and modify outer
+  variables. This is sometimes what you want and sometimes a footgun.
+
+- **Tree-walker, so it's slow.** Roughly an order of magnitude slower than
+  Lua. Use a faster language if performance matters; embed Flux if simplicity
+  matters more.
+
+- **Stack depth limit is 1000** for non-tail recursion. Tail calls are
+  unbounded. Adjust `interp.max_stack` from C++ if needed.
+
+---
+
+## Project layout
+
+```
+flux.h            single-header interpreter (~2300 lines)
+flux_main.cpp     minimal host: runs a file or starts the REPL
+reference.flux    annotated tour of every feature with prints
+test_core.flux    301 assertions covering operators, builtins, control flow,
+                  closures, dicts, errors — runnable as a regression suite
+README.md         this file
+```
+
+To verify everything works:
+
+```bash
+g++ -std=c++17 -O2 flux_main.cpp -o flux
+./flux test_core.flux        # → "Total: 301 passed, 0 failed"
+./flux reference.flux        # → guided walkthrough with output
+```
