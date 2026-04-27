@@ -1,6 +1,8 @@
 # Flux
 
-A small, embeddable scripting language in a single C++17 header.
+A small, embeddable scripting language in a single C++17 header. Designed for
+hosts where the heavy lifting (DSP, audio I/O, numerical kernels, ML) lives in
+C++ and the script is the orchestration glue.
 
 ```flux
 func make_counter() {
@@ -9,22 +11,37 @@ func make_counter() {
 }
 
 var c = make_counter()
-print c() c() c()           # → 1 2 3
+print c() c() c()                       # → 1 2 3
 
-# NumPy-ish vec with broadcasting
-print sum(sqrt(range(1, 101)))     # → 671.4629…
+# NumPy-flavored vec with broadcasting
+print sum(sqrt(range(1, 101)))          # → 671.4629…
 
-# Dicts, closures, try/catch, tail calls — all in ~2300 lines of C++.
+# First-class audio buffer (interleaved doubles, frames × channels)
+var buf = buffer(1024, 2, 48000)
+buf[0, 0] = 0.5                         # frame 0, left
+print frames(buf) channels(buf)         # → 1024 2
+
+# Self-documenting functions
+func gain(x, db) {
+    "Apply a gain in dB to a sample or vec."
+    return x * pow(10, db / 20)
+}
+print help(gain)                        # → "Apply a gain in dB to a sample or vec."
+
+# Closures, dicts, try/catch/finally, tail calls — ~2700 lines of C++.
+print flux_version                      # → "0.2.0"
 ```
 
 Flux is a tree-walking interpreter aimed at being **easy to drop into a C++
 application** when you need a runtime scripting layer that's a bit more than a
 config file: dynamic typing with numeric arrays, dicts, closures, structured
-errors, and a cooperative-scheduling hook so a host program can interrupt or
-time-slice user code without changing the language.
+errors, an opaque-handle type for host-owned data, a cooperative-scheduling
+hook, and a first-class audio buffer.
 
-It is not designed to compete with V8 or LuaJIT on raw speed. It is designed to
-be **boring to embed, hard to crash, and pleasant to read**.
+It is not designed to compete with V8 or LuaJIT on raw speed. It is designed
+to be **boring to embed, hard to crash, and pleasant to read**. The intended
+shape of a Flux-using program is: heavy lifting in C++, expressed as a few
+dozen `register_builtin(...)` calls; everything else in script.
 
 ---
 
@@ -37,10 +54,13 @@ be **boring to embed, hard to crash, and pleasant to read**.
   - [Operators](#operators)
   - [Strings](#strings)
   - [Vec — numeric arrays](#vec--numeric-arrays)
+  - [Buffers — first-class audio](#buffers--first-class-audio)
   - [Lists](#lists)
   - [Dicts](#dicts)
+  - [Opaque — host-side handles](#opaque--host-side-handles)
   - [Control flow](#control-flow)
   - [Functions and closures](#functions-and-closures)
+  - [Docstrings & help()](#docstrings--help)
   - [Errors](#errors)
   - [Modules](#modules)
   - [Introspection](#introspection)
@@ -49,6 +69,7 @@ be **boring to embed, hard to crash, and pleasant to read**.
 - [Cooperative scheduling](#cooperative-scheduling)
 - [Gotchas](#gotchas)
 - [Project layout](#project-layout)
+- [Roadmap](#roadmap)
 
 ---
 
@@ -57,19 +78,33 @@ be **boring to embed, hard to crash, and pleasant to read**.
 - **Single header.** Drop `flux.h` into a project, `#include` it, you have a
   language. No build system, no dependencies beyond a C++17 standard library.
 - **Tree-walking interpreter.** The implementation is straightforward and
-  hackable: ~600 lines of parser, ~600 of evaluator, ~700 of standard library.
+  hackable: ~600 lines of parser, ~700 of evaluator, ~800 of standard library.
 - **NumPy-flavored numerics via `std::valarray`.** Scalars are 1-element vecs;
   the same operators broadcast across element-wise math.
-- **Lua-flavored composite types.** Lists are mutable, reference-shared. Dicts
-  use `{key: value}` syntax, support `.member` and `["key"]` access, and
-  iterate keys in sorted order.
+- **First-class audio buffer.** A `Buffer` value type with `n_frames`,
+  `n_channels`, and `sample_rate`. Indexable as `buf[i]` (returns a vec for
+  the frame) and `buf[i, c]` (returns a scalar). Reference-shared, so passing
+  to a native C++ DSP kernel is a pointer copy.
+- **Opaque handles for host data.** A `shared_ptr<void>` plus a type tag.
+  Lets host C++ attach FFT plans, ML model weights, file/stream handles, audio
+  device handles — anything that can't be expressed as a Flux value — and
+  pass them through script unmolested.
+- **Lua-flavored composite types.** Lists are mutable, reference-shared.
+  Dicts use `{key: value}` syntax, support `.member` and `["key"]` access,
+  and iterate keys in sorted order.
 - **Real closures + tail-call optimization.** A `return f(args...)` in tail
   position reuses the C++ call frame, so deep tail recursion is unbounded.
-- **Structured errors with stack traces.** `try { ... } catch (e) { ... }`
-  binds `e` as a dict containing `message`, `file`, `line`, and `trace`.
+- **Structured errors with stack traces, plus `finally`.**
+  `try { ... } catch (e) { ... } finally { ... }` — finally runs even when
+  the try block `return`s out of the enclosing function.
+- **Self-documenting functions.** A string literal as the first statement of
+  a function body becomes its docstring. `help(fn)` retrieves it. Native
+  builtins can register docstrings too.
 - **Cooperative scheduling hook.** A host can install a `yield` callback that
   fires at every loop iteration, block step, and function call — useful for
   cancellation, time-slicing, or progress reporting from C++.
+- **Cycle-safe.** `repr()` and `==` on self-referential lists/dicts no longer
+  blow the stack. Cyclic data prints `(...)` / `{...}` for the back-edge.
 - **Deterministic shutdown.** Closure↔environment cycles are broken at
   interpreter destruction without leaking.
 
@@ -122,17 +157,20 @@ int main(int argc, char** argv) {
 
 ### Values and types
 
-There are seven value kinds: `nil`, `scalar` (a 1-element vec), `vec`, `string`,
-`list`, `dict`, `func`. The type tag for any value is reported by `type(x)`.
+There are nine value kinds: `nil`, `scalar` (a 1-element vec), `vec`, `string`,
+`list`, `dict`, `buffer`, `opaque`, `func`. The type tag for any value is
+reported by `type(x)`.
 
 ```flux
-type(nil)        # "nil"
-type(42)         # "scalar"        — internally a Vec of size 1
-type([1, 2, 3])  # "vec"
-type("hi")       # "string"
-type(list(1,2))  # "list"
-type({a: 1})     # "dict"
-type(print)      # "func"
+type(nil)            # "nil"
+type(42)             # "scalar"        — internally a Vec of size 1
+type([1, 2, 3])      # "vec"
+type("hi")           # "string"
+type(list(1,2))      # "list"
+type({a: 1})         # "dict"
+type(buffer(64, 2))  # "buffer"
+type(print)          # "func"
+# type(x) == "opaque" for host-supplied handles
 ```
 
 Variables are introduced with `var name = expr` and reassigned with `name =
@@ -143,7 +181,7 @@ var x = 1            # declare in current scope
 x = x + 1            # reassign — looks up the chain, doesn't shadow
 ```
 
-Constants: `pi`, `e`, `inf`, `nil`, `true` (= 1), `false` (= 0).
+Constants: `pi`, `e`, `inf`, `nil`, `true` (= 1), `false` (= 0), `flux_version`.
 
 ### Operators
 
@@ -152,14 +190,15 @@ arithmetic    +  -  *  /  %                  (numeric)
 comparison    == != < > <= >=                (== / != are structural)
 logical       and  or  not                   (short-circuit and/or)
 unary         -  not                         (numeric / boolean)
-indexing      x[i]                           (vec, list, string, dict)
+indexing      x[i]      x[i, j]              (i,j only on buffer)
 member        x.k                            (dict)
 call          f(args...)
 ```
 
 `==` and `!=` are **structural and recursive** — they walk into lists and
-dicts and compare element-by-element. Across types they always disagree, so
-`1 != "1"` and `nil != 0`.
+dicts and compare element-by-element. The recursion is cycle-safe
+(co-inductive). Across types they always disagree, so `1 != "1"` and
+`nil != 0`.
 
 ```flux
 list(1, 2, 3) == list(1, 2, 3)        # 1
@@ -228,6 +267,43 @@ sin([0, pi/2, pi])  # [0, 1, ~0]
 
 Numeric scalars are a Vec of size 1 — that's how `2 + [1, 2, 3]` broadcasts.
 
+### Buffers — first-class audio
+
+A `Buffer` holds an interleaved array of doubles plus `n_frames`,
+`n_channels`, and `sample_rate`. It's the bridge between Flux scripts and
+host C++ DSP code: hosts allocate buffers, fill them with native I/O
+functions, and pass them back and forth as values. Buffers are
+**reference-shared** (like list/dict); use `copy(b)` to detach.
+
+```flux
+var mono = buffer(1024)              # 1 channel, 44100 Hz default
+var st   = buffer(1024, 2, 48000)    # stereo @ 48 kHz
+
+frames(st)                           # 1024
+channels(st)                         # 2
+sample_rate(st)                      # 48000
+len(st)                              # 1024  (== frames)
+
+# Indexing
+mono[0] = 0.5                        # mono: scalar in / out
+mono[-1]                             # negative wraps from end
+st[0, 0] = 0.1                       # frame 0, left
+st[0, 1] = 0.2                       # frame 0, right
+st[5]                                # vec [L, R] for frame 5
+st[3] = [0.3, -0.3]                  # whole-frame assignment via vec
+
+# Iteration: scalar per frame for mono, vec per frame for multichannel
+var energy = 0
+for (var fr in st) { energy = energy + sum(fr * fr) }
+
+# Conversions
+var v   = buffer_to_vec(mono)        # interleaved samples → Vec
+var b   = vec_to_buffer([1,2,3], 22050)  # Vec → mono buffer at 22.05 kHz
+```
+
+Multi-dimensional indexing `buf[i, j]` is a Buffer-only feature; using it on
+a vec/list/dict is an error.
+
 ### Lists
 
 Lists hold any mix of values. Built with `list(...)`. **Reference-shared**:
@@ -289,6 +365,39 @@ cfg.db.port = 9999      # ok — db exists
 cfg.x.y = 1             # error: no such member 'x' (no auto-vivification)
 ```
 
+**Convention for native functions with many optional arguments:** pass a
+trailing options dict.
+
+```flux
+# in a host-supplied native:
+stft(signal, {win: 1024, hop: 256, type: "hann", normalize: 1})
+```
+
+This avoids needing keyword arguments at the language level. Apply it
+consistently across a library and the API stays predictable.
+
+### Opaque — host-side handles
+
+Opaque values wrap a `shared_ptr<void>` plus a type tag. They originate in
+C++ host code (FFT plans, ML weights, file/stream handles, audio devices) and
+are passed around Flux unchanged. From script you can ask the type tag, store
+them in dicts, and hand them back to native functions; you can't introspect
+their contents.
+
+```flux
+# (No Flux-side constructor — host C++ creates them.)
+opaque_type(handle)     # → "fft_plan"   (whatever tag the host set)
+type(handle)            # → "opaque"
+```
+
+The C++ side:
+
+```cpp
+auto plan = std::make_shared<MyFFTPlan>(1024);
+interp.global->def("plan",
+    flux::Value(flux::Opaque{"fft_plan", plan}));
+```
+
 ### Control flow
 
 ```flux
@@ -298,7 +407,7 @@ while (cond) { ... }
 
 for (var i = 0; i < 10; i = i + 1) { ... }
 
-for (var x in iterable) { ... }      # list, vec, string, dict (keys)
+for (var x in iterable) { ... }      # list, vec, string, dict (keys), buffer (frames)
 
 break          # leaves the innermost loop
 continue       # next iteration
@@ -346,10 +455,40 @@ func is_odd(k)  { if (k == 0) { return 0 } return is_even(k - 1) }
 is_even(100000)        # ok, no stack overflow
 ```
 
+### Docstrings & help()
+
+A string literal as the first statement of a function body is captured as
+that function's docstring. `help(fn)` retrieves it. The string still
+evaluates as a no-op statement, so line numbers and AST shape are unaffected.
+
+```flux
+func gain(x, db) {
+    "Apply a gain in dB to a sample or vec."
+    return x * pow(10, db / 20)
+}
+
+help(gain)               # "Apply a gain in dB to a sample or vec."
+help("gain")             # same — lookup by name
+help("buffer")           # native builtins register their own docs
+```
+
+`help` accepts a closure or a name string; for native functions, use the
+name string (closures wrapping natives lose the underlying name).
+
 ### Errors
 
-`error(msg)` raises. `try { ... } catch (e) { ... }` catches user errors
-(not `return`/`break`/`continue` — those remain control-flow primitives).
+`error(msg)` raises. `try { ... } catch (e) { ... } finally { ... }` handles
+control flow:
+
+- `try { ... } catch (e) { ... }` — catch errors only
+- `try { ... } finally { ... }` — cleanup only, errors propagate
+- `try { ... } catch (e) { ... } finally { ... }` — both
+
+`finally` runs in **all** exit paths: normal completion, caught errors,
+propagated errors, and even when the try block `return`s out of an enclosing
+function. Catches do not capture `return`/`break`/`continue` — those are
+control-flow primitives, not errors — but `finally` still runs around them.
+
 `e` is bound to a dict:
 
 ```flux
@@ -367,6 +506,21 @@ try {
     error("boom")
 } catch (e) {
     print "caught:" e.message "at line" e.line
+} finally {
+    print "always runs"
+}
+```
+
+Resource cleanup pattern (RAII you can write yourself):
+
+```flux
+func process(path) {
+    var f = open_file(path)              # host-supplied native returning opaque
+    try {
+        return analyze(f)
+    } finally {
+        close_file(f)                    # runs whether analyze returns or throws
+    }
 }
 ```
 
@@ -392,9 +546,12 @@ Search order:
 ### Introspection
 
 ```flux
-vars()       # sorted list of names visible in the current scope
-bindings()   # dict {name: value, ...} of visible bindings
-eval(src)    # parse + execute src in the current scope; returns last value
+vars()          # sorted list of names visible in the current scope
+bindings()      # dict {name: value, ...} of visible bindings
+help(fn|name)   # retrieve a function's docstring
+eval(src)       # parse + execute src in the current scope; returns last value
+bench(thunk)    # call thunk() and return wall-clock seconds
+flux_version    # string constant — "0.2.0"
 ```
 
 `eval` runs in the **caller's** scope: it can read and write outer variables.
@@ -403,6 +560,13 @@ eval(src)    # parse + execute src in the current scope; returns last value
 var dynamic = 0
 eval("dynamic = 7 * 6")
 print dynamic             # 42
+```
+
+`bench` is the easy way to time an algorithm during development:
+
+```flux
+var t = bench(func() { sum(sqrt(range(1, 100000))) })
+print "took" t "s"
 ```
 
 ---
@@ -415,6 +579,8 @@ print dynamic             # 42
 | Reductions | `sum`, `mean`, `min`, `max`                                      |
 | Element-wise math | `sqrt`, `abs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`, `log`, `floor`, `ceil`, `round`, `pow`, `sort` |
 | Vec constructors | `range`, `zeros`, `ones`, `vec`, `rand`, `seed`           |
+| Buffer     | `buffer`, `frames`, `channels`, `sample_rate`, `buffer_to_vec`, `vec_to_buffer` |
+| Opaque     | `opaque_type`                                                    |
 | List       | `list`, `push`, `pop`, `insert`, `remove`                        |
 | Dict       | `dict`, `keys`, `values`, `has`, `get`, `remove`                 |
 | Higher-order | `map`, `filter`, `reduce`, `each`, `apply`                     |
@@ -425,10 +591,10 @@ print dynamic             # 42
 | System     | `clock`, `sleep`, `env`, `exec`, `exit`                          |
 | Errors     | `error`, `assert`                                                |
 | Random     | `rand`, `seed`, `shuffle`                                        |
-| Introspection | `type`, `vars`, `bindings`, `eval`                            |
+| Introspection | `type`, `vars`, `bindings`, `help`, `eval`, `bench`           |
 | Output     | `print` (newline + space-separated), `out` (no separator/newline), `format` (`{}` placeholders) |
 
-See `reference.flux` for one example of every function with expected output.
+See `reference.flux` for one example of every feature with expected output.
 
 ---
 
@@ -443,10 +609,12 @@ flux::Interpreter interp;
 interp.run_file("script.flux");
 ```
 
-To register a host-side function:
+To register a host-side function with a docstring (recommended — `help()`
+will surface it):
 
 ```cpp
 interp.register_builtin("greet",
+    "greet(name) — say hello to someone.",
     [](const std::vector<flux::Value>& args, int line, const std::string& file) {
         if (args.size() != 1 || !args[0].is_str())
             flux::err(file, line, "greet: expects one string");
@@ -454,7 +622,8 @@ interp.register_builtin("greet",
     });
 ```
 
-Now `greet("world")` works from Flux code.
+(The two-argument form without a docstring also works.) Now `greet("world")`
+runs from script and `help("greet")` returns the description.
 
 To pass values back and forth:
 
@@ -466,6 +635,49 @@ flux::Value result = interp.eval(/* parsed expr */, interp.global);
 if (result.is_vec()) {
     for (double x : result.as_vec()) { /* ... */ }
 }
+```
+
+To return an audio buffer from a native (e.g. `read_wav`):
+
+```cpp
+interp.register_builtin("sine_wave",
+    "sine_wave(hz, secs, sr) — generate a mono sine.",
+    [](const std::vector<flux::Value>& a, int ln, const std::string& f) {
+        double hz = a[0].scalar();
+        double secs = a[1].scalar();
+        double sr = a[2].scalar();
+        auto buf = std::make_shared<flux::Buffer>();
+        buf->n_frames = (size_t)(secs * sr);
+        buf->n_channels = 1;
+        buf->sample_rate = sr;
+        buf->data.resize(buf->n_frames);
+        for (size_t i = 0; i < buf->n_frames; ++i)
+            buf->data[i] = std::sin(2 * M_PI * hz * i / sr);
+        return flux::Value(buf);
+    });
+```
+
+To attach an opaque host handle (FFT plan, model, file handle):
+
+```cpp
+struct MyFFTPlan { /* ... */ };
+
+interp.register_builtin("make_fft_plan",
+    "make_fft_plan(size) — allocate a reusable FFT plan.",
+    [](const std::vector<flux::Value>& a, int ln, const std::string& f) {
+        auto plan = std::make_shared<MyFFTPlan>((int)a[0].scalar());
+        return flux::Value(flux::Opaque{"fft_plan", plan});
+    });
+
+interp.register_builtin("fft_apply",
+    "fft_apply(plan, buf) — run the FFT in-place on buf.",
+    [](const std::vector<flux::Value>& a, int ln, const std::string& f) {
+        if (!a[0].is_opaque() || a[0].as_opaque().type_tag != "fft_plan")
+            flux::err(f, ln, "fft_apply: expected fft_plan");
+        auto plan = std::static_pointer_cast<MyFFTPlan>(a[0].as_opaque().ptr);
+        // ... use plan and a[1].as_buffer() ...
+        return flux::Value(nullptr);
+    });
 ```
 
 Error handling: every error from Flux code throws `flux::Error`, which is a
@@ -494,9 +706,17 @@ interp.set_yield([&]{
 // — the running script halts cleanly with a normal Error at the next yield.
 ```
 
-Use cases: stopping runaway scripts, integrating with a real-time audio
-callback, gating script execution on a frame budget, or hooking up a progress
-bar.
+**Threading model.** Flux is intended for **offline use or a control thread**,
+not the audio thread. The shared-pointer-based allocator and exception-based
+control flow are not realtime-safe. The recommended host architecture is:
+
+- C++ audio thread: lock-free, no Flux calls
+- C++ / Flux control thread: parameter changes, analysis, scheduling
+- Communication via lock-free queues or atomics
+
+Typical use cases: running runaway scripts under a watchdog, integrating
+script-driven analysis with a UI, gating execution on a frame budget, hooking
+up a progress bar.
 
 ---
 
@@ -507,9 +727,9 @@ A short list of behaviors worth knowing:
 - **Strings are byte sequences.** `len("é")` is 2 (UTF-8). Iteration splits
   multibyte characters. There is no built-in codepoint API.
 
-- **Lists and dicts are reference-typed; vecs and strings are value-typed.**
-  `var b = a` shares storage for lists and dicts but copies for vecs and
-  strings. Use `copy(a)` to detach.
+- **Lists, dicts, and buffers are reference-typed; vecs and strings are
+  value-typed.** `var b = a` shares storage for lists, dicts, and buffers,
+  but copies for vecs and strings. Use `copy(a)` to detach in either case.
 
 - **Vec assignment is by value, but `v[i] = x` mutates in place.** Two
   separate operations.
@@ -525,6 +745,15 @@ A short list of behaviors worth knowing:
 - **Numbers are doubles.** No integer type, no bitwise ops. Indexing
   truncates to int.
 
+- **Multi-index `x[i, j]` is buffer-only.** Using it on vecs or lists
+  errors out.
+
+- **Cyclic data does not free.** Self-referential lists/dicts (`push(l, l)`,
+  `d.self = d`) are well-supported by the language — `repr` and `==` are
+  cycle-safe — but the underlying `shared_ptr` storage forms a reference
+  cycle that won't be reclaimed without a garbage collector. Don't build
+  cyclic graphs in long-running processes.
+
 - **`load` is memoized.** Re-loading the same file is a no-op. To genuinely
   re-run a file, use `eval(read("path.flux"))`.
 
@@ -532,8 +761,8 @@ A short list of behaviors worth knowing:
   variables. This is sometimes what you want and sometimes a footgun.
 
 - **Tree-walker, so it's slow.** Roughly an order of magnitude slower than
-  Lua. Use a faster language if performance matters; embed Flux if simplicity
-  matters more.
+  Lua. The intent is that hot inner loops live in C++ kernels you call from
+  Flux, not in Flux itself. Use `bench(thunk)` to measure.
 
 - **Stack depth limit is 1000** for non-tail recursion. Tail calls are
   unbounded. Adjust `interp.max_stack` from C++ if needed.
@@ -543,11 +772,12 @@ A short list of behaviors worth knowing:
 ## Project layout
 
 ```
-flux.h            single-header interpreter (~2300 lines)
+flux.h            single-header interpreter (~2700 lines, v0.2.0)
 flux_main.cpp     minimal host: runs a file or starts the REPL
 reference.flux    annotated tour of every feature with prints
-test_core.flux    301 assertions covering operators, builtins, control flow,
-                  closures, dicts, errors — runnable as a regression suite
+test_core.flux    355 assertions covering operators, builtins, control flow,
+                  closures, dicts, buffers, try/finally, cycles, docstrings —
+                  runnable as a regression suite
 README.md         this file
 ```
 
@@ -555,6 +785,39 @@ To verify everything works:
 
 ```bash
 g++ -std=c++17 -O2 flux_main.cpp -o flux
-./flux test_core.flux        # → "Total: 301 passed, 0 failed"
+./flux test_core.flux        # → "Total: 355 passed, 0 failed"
 ./flux reference.flux        # → guided walkthrough with output
 ```
+
+---
+
+## Roadmap
+
+Items already in 0.2 are listed under [Design](#design). Items being
+considered for future revisions, in rough order of priority:
+
+**Language ergonomics:**
+- Typed-signature wrapper for `register_builtin` so a one-line signature
+  string replaces the `args.size()` / `is_vec()` / `as_str()` boilerplate.
+- Symbol or interned-string optimization for hot dict keys / mode strings
+  (`mode: "hann"`, `kernel: "rbf"`).
+
+**Tooling (separate from `flux.h`):**
+- `--check` mode: parse-only validation for CI and editor integration.
+- AST cache: serialize parsed modules to disk for faster re-loads.
+- Linenoise REPL with history, Ctrl-R search, multiline editing.
+- Structured logging hook so a host can capture diagnostic output.
+- libFuzzer target on the lexer / parser / evaluator.
+
+**Project hygiene:**
+- CHANGELOG.md tracking every release.
+- CI matrix: `-O0 / -O2 / -O3` × `asan,ubsan` × clang/gcc.
+- Contributor / extension guide showing exactly how to add a builtin and a
+  new value type.
+
+**Explicitly not planned:**
+- Realtime-safe audio thread support. (See
+  [Cooperative scheduling § Threading model](#cooperative-scheduling).)
+- Integer types or bitwise operations. (Doubles only is a deliberate
+  simplification.)
+- Module-as-namespace or class system. (Use dicts.)
