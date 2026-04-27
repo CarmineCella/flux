@@ -31,6 +31,8 @@
 #include <chrono>
 #include <thread>
 #include <random>
+#include <cerrno>
+#include <cctype>
 #include <array>
 #include <filesystem>
 
@@ -1054,6 +1056,149 @@ struct Parser {
     }
 };
 
+// ── Typed argument signatures (for reg_typed) ─────────────────────────
+// A tiny mini-language for declaring native function signatures, so the
+// per-argument arity/type checking boilerplate can be folded into the
+// registration. The signature is also surfaced through help().
+//
+// Token grammar:    type ('?' if optional)
+//                   types separated by ','
+//                   trailing 'opaque:tag' for tag-checked opaques
+// Type names: any, nil, scalar, int, number, vec, string, list, dict,
+//             buffer, opaque[:tag], func
+// Optional args (with trailing ?) must be at the end.
+//
+// Examples:
+//   ""                          — zero args
+//   "string"                    — exactly one string
+//   "buffer, int, int"          — three required
+//   "buffer, int, int?"         — last is optional
+//   "opaque:fft_plan, buffer"   — first must be opaque tagged "fft_plan"
+struct ArgSpec {
+    enum Kind { Any, Nil, Scalar, Vec, Str, List, Dict,
+                Buffer, Opaque, Func };
+    Kind kind = Any;
+    std::string tag;        // for opaque:tag
+    bool optional = false;
+};
+
+inline const char* arg_kind_name(ArgSpec::Kind k) {
+    switch (k) {
+        case ArgSpec::Any:    return "any";
+        case ArgSpec::Nil:    return "nil";
+        case ArgSpec::Scalar: return "scalar";
+        case ArgSpec::Vec:    return "vec";
+        case ArgSpec::Str:    return "string";
+        case ArgSpec::List:   return "list";
+        case ArgSpec::Dict:   return "dict";
+        case ArgSpec::Buffer: return "buffer";
+        case ArgSpec::Opaque: return "opaque";
+        case ArgSpec::Func:   return "func";
+    }
+    return "?";
+}
+
+inline std::string value_kind_name(const Value& v) {
+    if (v.is_nil()) return "nil";
+    if (v.is_vec()) return v.as_vec().size() == 1 ? "scalar" : "vec";
+    if (v.is_str()) return "string";
+    if (v.is_list()) return "list";
+    if (v.is_dict()) return "dict";
+    if (v.is_buffer()) return "buffer";
+    if (v.is_opaque()) return "opaque:" + v.as_opaque().type_tag;
+    if (v.is_closure() || v.is_native()) return "func";
+    return "?";
+}
+
+inline bool match_arg(const Value& v, const ArgSpec& s) {
+    switch (s.kind) {
+        case ArgSpec::Any:    return true;
+        case ArgSpec::Nil:    return v.is_nil();
+        case ArgSpec::Scalar: return v.is_vec() && v.as_vec().size() == 1;
+        case ArgSpec::Vec:    return v.is_vec();
+        case ArgSpec::Str:    return v.is_str();
+        case ArgSpec::List:   return v.is_list();
+        case ArgSpec::Dict:   return v.is_dict();
+        case ArgSpec::Buffer: return v.is_buffer();
+        case ArgSpec::Opaque:
+            if (!v.is_opaque()) return false;
+            return s.tag.empty() || v.as_opaque().type_tag == s.tag;
+        case ArgSpec::Func:   return v.is_closure() || v.is_native();
+    }
+    return false;
+}
+
+inline std::vector<ArgSpec> parse_signature(const std::string& sig) {
+    std::vector<ArgSpec> out;
+    auto skip_ws = [&](size_t& i) {
+        while (i < sig.size() && (sig[i] == ' ' || sig[i] == '\t')) ++i;
+    };
+    auto read_ident = [&](size_t& i) {
+        size_t s = i;
+        while (i < sig.size() &&
+               (std::isalnum((unsigned char)sig[i]) || sig[i] == '_'))
+            ++i;
+        return sig.substr(s, i - s);
+    };
+
+    size_t i = 0;
+    skip_ws(i);
+    if (i >= sig.size()) return out;
+
+    while (i < sig.size()) {
+        skip_ws(i);
+        std::string tok = read_ident(i);
+        if (tok.empty())
+            throw std::runtime_error("bad signature: '" + sig + "'");
+        ArgSpec spec;
+        if      (tok == "any")                        spec.kind = ArgSpec::Any;
+        else if (tok == "nil")                        spec.kind = ArgSpec::Nil;
+        else if (tok == "scalar" || tok == "number" ||
+                 tok == "int")                        spec.kind = ArgSpec::Scalar;
+        else if (tok == "vec")                        spec.kind = ArgSpec::Vec;
+        else if (tok == "string")                     spec.kind = ArgSpec::Str;
+        else if (tok == "list")                       spec.kind = ArgSpec::List;
+        else if (tok == "dict")                       spec.kind = ArgSpec::Dict;
+        else if (tok == "buffer")                     spec.kind = ArgSpec::Buffer;
+        else if (tok == "opaque")                     spec.kind = ArgSpec::Opaque;
+        else if (tok == "func")                       spec.kind = ArgSpec::Func;
+        else
+            throw std::runtime_error("bad signature type '" + tok + "' in '" + sig + "'");
+
+        // opaque:tag refinement
+        if (spec.kind == ArgSpec::Opaque &&
+            i < sig.size() && sig[i] == ':') {
+            ++i;
+            spec.tag = read_ident(i);
+            if (spec.tag.empty())
+                throw std::runtime_error("bad signature: opaque: missing tag");
+        }
+
+        // optional ?
+        if (i < sig.size() && sig[i] == '?') {
+            spec.optional = true;
+            ++i;
+        }
+        out.push_back(spec);
+
+        skip_ws(i);
+        if (i >= sig.size()) break;
+        if (sig[i] == ',') { ++i; continue; }
+        throw std::runtime_error("bad signature near '" +
+                                 std::string(1, sig[i]) + "' in '" + sig + "'");
+    }
+
+    // Validate: optional args must form a trailing run.
+    bool seen_opt = false;
+    for (auto& s : out) {
+        if (s.optional) seen_opt = true;
+        else if (seen_opt)
+            throw std::runtime_error(
+                "required arg follows optional in '" + sig + "'");
+    }
+    return out;
+}
+
 // ── Interpreter ───────────────────────────────────────────────────────
 struct Interpreter {
     EnvPtr global;
@@ -1144,6 +1289,51 @@ struct Interpreter {
         native_docs[name] = doc;
         global->def(name, Value(std::move(fn)));
     }
+
+    // Register a native with a typed signature. The signature string is
+    // parsed (see parse_signature) and the supplied lambda is wrapped in a
+    // checker that validates arity and per-argument type before dispatch.
+    // Errors mention the function name, argument position, expected type,
+    // and actual received type. The signature is also stored in native_docs
+    // so help() reports it. Pass an empty doc string to use only the signature.
+    void reg_typed(const char* name,
+                   const std::string& sig_str,
+                   const std::string& doc,
+                   NativeFn fn) {
+        auto specs = parse_signature(sig_str);
+        size_t n_required = 0;
+        for (auto& s : specs) if (!s.optional) ++n_required;
+        size_t n_total = specs.size();
+
+        std::string nm(name);
+        std::string sig_show = nm + "(" + sig_str + ")";
+        native_docs[nm] = doc.empty() ? sig_show : (sig_show + " — " + doc);
+
+        NativeFn wrapped =
+          [nm, specs = std::move(specs), n_required, n_total, fn = std::move(fn)]
+          (const std::vector<Value>& a, int ln, const std::string& f) -> Value {
+            if (a.size() < n_required || a.size() > n_total) {
+                std::string msg = nm + ": expected ";
+                if (n_required == n_total) msg += std::to_string(n_required);
+                else msg += std::to_string(n_required) + "-" + std::to_string(n_total);
+                msg += " arg" + std::string(n_total == 1 ? "" : "s")
+                     + ", got " + std::to_string(a.size());
+                err(f, ln, msg);
+            }
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (!match_arg(a[i], specs[i])) {
+                    std::string want = arg_kind_name(specs[i].kind);
+                    if (!specs[i].tag.empty()) want += ":" + specs[i].tag;
+                    err(f, ln, nm + ": arg " + std::to_string(i + 1)
+                             + " expected " + want
+                             + ", got " + value_kind_name(a[i]));
+                }
+            }
+            return fn(a, ln, f);
+        };
+        global->def(nm, Value(std::move(wrapped)));
+    }
+
     // Public hook for hosts to register additional builtins after construction.
     void register_builtin(const std::string& name, NativeFn fn) {
         global->def(name, Value(std::move(fn)));
@@ -1151,6 +1341,13 @@ struct Interpreter {
     void register_builtin(const std::string& name, const std::string& doc, NativeFn fn) {
         native_docs[name] = doc;
         global->def(name, Value(std::move(fn)));
+    }
+    // Public counterpart of reg_typed for host code.
+    void register_builtin_typed(const std::string& name,
+                                const std::string& sig,
+                                const std::string& doc,
+                                NativeFn fn) {
+        reg_typed(name.c_str(), sig, doc, std::move(fn));
     }
 
     // ── call (with tail-call trampoline + signal containment) ────────
@@ -2638,39 +2835,139 @@ struct Interpreter {
         run_file(canon, global);
     }
 
-    void repl() {
-        std::string input;
-        while (true) {
-            std::cout << (input.empty() ? ">> " : ".. ") << std::flush;
-            std::string line;
-            if (!std::getline(std::cin, line)) break;
-            if (input.empty() && (line == "quit" || line == "exit")) break;
-            if (input.empty() && line.empty()) continue;
-            input += line + "\n";
-            int depth = 0;
-            bool in_str = false;
-            for (size_t i = 0; i < input.size(); ++i) {
-                char c = input[i];
-                if (c == '"' && (i == 0 || input[i-1] != '\\')) { in_str = !in_str; continue; }
-                if (in_str) continue;
-                if (c == '#') { while (i < input.size() && input[i] != '\n') ++i; continue; }
-                if (c == '{' || c == '(' || c == '[') ++depth;
-                if (c == '}' || c == ')' || c == ']') --depth;
-            }
-            if (depth > 0 || in_str) continue;
-            try {
-                auto lr = run_source_repl(input, "<repl>", global);
-                if (lr.printable) std::cout << lr.value.repr() << '\n';
-            } catch (std::exception& e) {
-                std::cerr << "error: " << e.what() << '\n';
-                call_stack.clear();
-                function_depth = 0;
-                loop_depth = 0;
-            }
-            input.clear();
-        }
-    }
+    void repl();
 };
+
+// ── REPL helpers ──────────────────────────────────────────────────────
+// Heuristic: scan the accumulated input for unbalanced delimiters, an
+// unclosed string, or an unclosed block comment. While any of those is
+// still pending we should keep prompting for more lines. Once the scan
+// shows everything balanced we hand the buffer to the parser, which will
+// raise an ordinary error if the input is merely *wrong* rather than
+// incomplete (e.g. `try { } else { }`).
+inline bool is_input_complete(const std::string& s) {
+    int parens = 0, brackets = 0, braces = 0;
+    bool in_str = false;
+    bool in_block = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (in_block) {
+            if (c == '*' && i + 1 < s.size() && s[i + 1] == '/') {
+                in_block = false; ++i;
+            }
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < s.size()) { ++i; continue; }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '#') {
+            while (i < s.size() && s[i] != '\n') ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            in_block = true; ++i; continue;
+        }
+        if (c == '"') { in_str = true; continue; }
+        if (c == '(') ++parens;
+        else if (c == ')') --parens;
+        else if (c == '[') ++brackets;
+        else if (c == ']') --brackets;
+        else if (c == '{') ++braces;
+        else if (c == '}') --braces;
+    }
+    // Complete iff: no in-progress string/comment AND no unclosed opens.
+    // Negative imbalance (extra closers) is a syntax error — let the
+    // parser produce the diagnostic.
+    return !in_str && !in_block
+        && parens <= 0 && brackets <= 0 && braces <= 0;
+}
+
+#ifdef FLUX_USE_READLINE
+extern "C" {
+#include <readline/readline.h>
+#include <readline/history.h>
+}
+#endif
+
+// Lines that are only whitespace shouldn't end up in the history file.
+inline bool is_blank(const std::string& s) {
+    for (char c : s) if (c != ' ' && c != '\t' && c != '\n') return false;
+    return true;
+}
+
+inline void Interpreter::repl() {
+#ifdef FLUX_USE_READLINE
+    using_history();
+    stifle_history(1000);                            // cap history length
+    std::string history_path;
+    if (const char* home = std::getenv("HOME")) {
+        history_path = std::string(home) + "/.flux_history";
+        read_history(history_path.c_str());          // ignore failure
+    }
+#endif
+
+    std::string accum;
+    while (true) {
+        const char* prompt = accum.empty() ? ">> " : ".. ";
+
+#ifdef FLUX_USE_READLINE
+        char* raw = readline(prompt);
+        if (!raw) {                                   // EOF / Ctrl-D on empty line
+            std::cout << '\n';
+            break;
+        }
+        std::string line(raw);
+        free(raw);
+#else
+        std::cout << prompt << std::flush;
+        std::string line;
+        if (!std::getline(std::cin, line)) { std::cout << '\n'; break; }
+#endif
+
+        if (accum.empty() && (line == "quit" || line == "exit")) break;
+        if (accum.empty() && is_blank(line)) continue;
+
+        accum += line;
+        accum += '\n';
+
+        if (!is_input_complete(accum)) continue;
+
+        // Trim trailing whitespace before adding to history.
+        std::string for_history = accum;
+        while (!for_history.empty() &&
+               (for_history.back() == '\n' || for_history.back() == ' ' ||
+                for_history.back() == '\t'))
+            for_history.pop_back();
+
+#ifdef FLUX_USE_READLINE
+        if (!for_history.empty()) {
+            // Convert embedded newlines so the whole multi-line entry shows
+            // up as a single history item that we can recall and re-edit.
+            std::string h;
+            h.reserve(for_history.size());
+            for (char c : for_history) h += (c == '\n') ? ' ' : c;
+            // Skip exact-duplicate consecutive entries.
+            HIST_ENTRY* last = history_get(history_length);
+            if (!last || h != last->line) add_history(h.c_str());
+            if (!history_path.empty())
+                write_history(history_path.c_str());
+        }
+#endif
+
+        try {
+            auto lr = run_source_repl(accum, "<repl>", global);
+            if (lr.printable) std::cout << lr.value.repr() << '\n';
+        } catch (std::exception& e) {
+            std::cerr << "error: " << e.what() << '\n';
+            call_stack.clear();
+            function_depth = 0;
+            loop_depth = 0;
+        }
+        accum.clear();
+    }
+}
 
 } // namespace flux
 

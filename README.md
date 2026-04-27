@@ -100,6 +100,11 @@ dozen `register_builtin(...)` calls; everything else in script.
 - **Self-documenting functions.** A string literal as the first statement of
   a function body becomes its docstring. `help(fn)` retrieves it. Native
   builtins can register docstrings too.
+- **Typed signatures for natives.** `register_builtin_typed("fft_apply",
+  "opaque:fft_plan, buffer", "...", lambda)` parses the signature, wraps the
+  lambda in an arity + type checker, and surfaces the signature through
+  `help()`. Errors mention function, argument position, expected type,
+  and actual type.
 - **Cooperative scheduling hook.** A host can install a `yield` callback that
   fires at every loop iteration, block step, and function call — useful for
   cancellation, time-slicing, or progress reporting from C++.
@@ -134,6 +139,35 @@ g++ -std=c++17 -O2 flux_main.cpp -o flux
 285
 >> quit
 ```
+
+**REPL with line editing.** Build against GNU readline to get a proper line
+editor — arrow keys for cursor and history, `~/.flux_history` persistence,
+Ctrl-R reverse search, Home/End/Ctrl-A/E, etc. The provided `Makefile`
+auto-detects readline; for a manual build:
+
+```bash
+g++ -std=c++17 -O2 -DFLUX_USE_READLINE -o flux flux_main.cpp -lreadline
+```
+
+To opt out (e.g. on a system without readline) pass `make READLINE=0` or
+just compile without the `-DFLUX_USE_READLINE` flag — the REPL falls back
+to plain `getline()` and still works, just without history or editing.
+
+**Multi-line input** works in either mode. The REPL keeps reading lines
+until parens, brackets, braces, strings, and block comments are all
+balanced, then evaluates the whole buffer as one unit:
+
+```
+>> func square(x) {
+..     return x * x
+.. }
+>> square(7)
+49
+```
+
+Multi-line entries are recalled from history as a single item with
+newlines flattened to spaces — convenient for re-editing a function you
+wrote three commands ago.
 
 A minimal `flux_main.cpp`:
 
@@ -609,12 +643,39 @@ flux::Interpreter interp;
 interp.run_file("script.flux");
 ```
 
-To register a host-side function with a docstring (recommended — `help()`
-will surface it):
+To register a host-side function with a typed signature (recommended — the
+wrapper checks arity + per-arg type, surfaces good error messages, and feeds
+the signature into `help()`):
+
+```cpp
+interp.register_builtin_typed("greet",
+    "string",                                // signature
+    "Say hello to someone.",                 // doc
+    [](const std::vector<flux::Value>& a, int, const std::string&) {
+        return flux::Value(flux::Str("hello " + a[0].as_str()));
+    });
+```
+
+Now `greet("world")` runs from script and `help("greet")` returns
+`greet(string) — Say hello to someone.` Calling `greet(42)` from script
+raises `greet: arg 1 expected string, got scalar`.
+
+Signature mini-language:
+
+```
+type names:    any  nil  scalar  int  number  vec  string  list
+               dict  buffer  opaque  opaque:tag  func
+optional:      trailing '?'  (must form a contiguous tail)
+```
+
+Examples: `"buffer, int, int"`, `"buffer, int, int?"`,
+`"opaque:fft_plan, buffer"`, `""` for zero-arg natives.
+
+If you want full manual control (no auto-checking), the untyped form still
+works:
 
 ```cpp
 interp.register_builtin("greet",
-    "greet(name) — say hello to someone.",
     [](const std::vector<flux::Value>& args, int line, const std::string& file) {
         if (args.size() != 1 || !args[0].is_str())
             flux::err(file, line, "greet: expects one string");
@@ -622,8 +683,8 @@ interp.register_builtin("greet",
     });
 ```
 
-(The two-argument form without a docstring also works.) Now `greet("world")`
-runs from script and `help("greet")` returns the description.
+(There's also a three-argument form, `register_builtin(name, doc, fn)`, that
+attaches a docstring without type-checking.)
 
 To pass values back and forth:
 
@@ -662,23 +723,28 @@ To attach an opaque host handle (FFT plan, model, file handle):
 ```cpp
 struct MyFFTPlan { /* ... */ };
 
-interp.register_builtin("make_fft_plan",
-    "make_fft_plan(size) — allocate a reusable FFT plan.",
-    [](const std::vector<flux::Value>& a, int ln, const std::string& f) {
+interp.register_builtin_typed("make_fft_plan",
+    "int",
+    "Allocate a reusable FFT plan of the given size.",
+    [](const std::vector<flux::Value>& a, int, const std::string&) {
         auto plan = std::make_shared<MyFFTPlan>((int)a[0].scalar());
         return flux::Value(flux::Opaque{"fft_plan", plan});
     });
 
-interp.register_builtin("fft_apply",
-    "fft_apply(plan, buf) — run the FFT in-place on buf.",
-    [](const std::vector<flux::Value>& a, int ln, const std::string& f) {
-        if (!a[0].is_opaque() || a[0].as_opaque().type_tag != "fft_plan")
-            flux::err(f, ln, "fft_apply: expected fft_plan");
+interp.register_builtin_typed("fft_apply",
+    "opaque:fft_plan, buffer",          // tag-checked: rejects other opaques
+    "Run the FFT in-place on buf.",
+    [](const std::vector<flux::Value>& a, int, const std::string&) {
         auto plan = std::static_pointer_cast<MyFFTPlan>(a[0].as_opaque().ptr);
         // ... use plan and a[1].as_buffer() ...
         return flux::Value(nullptr);
     });
 ```
+
+The `opaque:fft_plan` tag in the signature means `fft_apply` is statically
+guaranteed (at the boundary) to receive an opaque whose `type_tag` is
+`"fft_plan"`. Pass any other opaque and the error message tells you exactly
+what you got: `fft_apply: arg 1 expected opaque:fft_plan, got opaque:blob`.
 
 Error handling: every error from Flux code throws `flux::Error`, which is a
 `std::exception` subclass exposing `.file`, `.line`, `.msg`, and `.trace`.
@@ -774,6 +840,7 @@ A short list of behaviors worth knowing:
 ```
 flux.h            single-header interpreter (~2700 lines, v0.2.0)
 flux_main.cpp     minimal host: runs a file or starts the REPL
+Makefile          auto-detects readline; `make` builds, `make test` runs tests
 reference.flux    annotated tour of every feature with prints
 test_core.flux    355 assertions covering operators, builtins, control flow,
                   closures, dicts, buffers, try/finally, cycles, docstrings —
@@ -797,15 +864,15 @@ Items already in 0.2 are listed under [Design](#design). Items being
 considered for future revisions, in rough order of priority:
 
 **Language ergonomics:**
-- Typed-signature wrapper for `register_builtin` so a one-line signature
-  string replaces the `args.size()` / `is_vec()` / `as_str()` boilerplate.
 - Symbol or interned-string optimization for hot dict keys / mode strings
   (`mode: "hann"`, `kernel: "rbf"`).
+- A few more unary/binary methods on Vec for DSP work
+  (`fft`, `ifft`, convolution) — currently expected via host-supplied natives.
 
 **Tooling (separate from `flux.h`):**
 - `--check` mode: parse-only validation for CI and editor integration.
 - AST cache: serialize parsed modules to disk for faster re-loads.
-- Linenoise REPL with history, Ctrl-R search, multiline editing.
+- Tab-completion in the REPL via readline's `rl_attempted_completion_function`.
 - Structured logging hook so a host can capture diagnostic output.
 - libFuzzer target on the lexer / parser / evaluator.
 
