@@ -5,6 +5,12 @@
 #ifndef FLUX_H
 #define FLUX_H
 
+// ── Version ───────────────────────────────────────────────────────────
+#define FLUX_VERSION_MAJOR 0
+#define FLUX_VERSION_MINOR 2
+#define FLUX_VERSION_PATCH 0
+#define FLUX_VERSION       "0.2.0"
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -42,6 +48,26 @@ using DictMap = std::unordered_map<std::string, Value>;
 using DictPtr = std::shared_ptr<DictMap>;
 using Str     = std::string;
 
+// ── Buffer — first-class audio/sample buffer ──────────────────────────
+// Frames × channels, interleaved (data[frame * n_channels + channel]).
+// Doubles for now; convert at C++ boundaries if your engine uses floats.
+struct Buffer {
+    std::vector<double> data;
+    size_t n_frames = 0;
+    size_t n_channels = 1;
+    double sample_rate = 44100.0;
+};
+using BufferPtr = std::shared_ptr<Buffer>;
+
+// ── Opaque — shared_ptr<void> handle for arbitrary C++ data ───────────
+// The host attaches things that can't be expressed as Flux values:
+// FFT plans, model weights, file/stream handles, audio device handles.
+// Type tag is for diagnostics and host-side dispatch.
+struct Opaque {
+    std::string type_tag;
+    std::shared_ptr<void> ptr;
+};
+
 struct Stmt;
 struct Expr;
 struct Closure {
@@ -50,6 +76,7 @@ struct Closure {
     std::vector<Stmt> body;
     EnvPtr env;
     const Expr* origin = nullptr;   // shared pointer to the FuncDecl AST node
+    std::string doc;                // optional docstring (first-stmt string literal)
 };
 using NativeFn = std::function<Value(const std::vector<Value>&, int, const std::string&)>;
 using YieldFn  = std::function<void()>;
@@ -83,7 +110,8 @@ struct Error : std::exception {
 
 // ── Value — scalars are Vec of size 1 ─────────────────────────────────
 struct Value {
-    std::variant<Vec, Str, ListPtr, DictPtr, Closure, NativeFn, std::nullptr_t> data;
+    std::variant<Vec, Str, ListPtr, DictPtr, BufferPtr, Opaque,
+                 Closure, NativeFn, std::nullptr_t> data;
     Value() : data(nullptr) {}
     Value(double d) : data(Vec{d}) {}
     Value(Vec v)    : data(std::move(v)) {}
@@ -91,6 +119,8 @@ struct Value {
     Value(List l)   : data(std::make_shared<List>(std::move(l))) {}
     Value(ListPtr p): data(std::move(p)) {}
     Value(DictPtr p): data(std::move(p)) {}
+    Value(BufferPtr p): data(std::move(p)) {}
+    Value(Opaque o) : data(std::move(o)) {}
     Value(Closure c): data(std::move(c)) {}
     Value(NativeFn f): data(std::move(f)) {}
     Value(std::nullptr_t) : data(nullptr) {}
@@ -99,6 +129,8 @@ struct Value {
     bool is_str()     const { return std::holds_alternative<Str>(data); }
     bool is_list()    const { return std::holds_alternative<ListPtr>(data); }
     bool is_dict()    const { return std::holds_alternative<DictPtr>(data); }
+    bool is_buffer()  const { return std::holds_alternative<BufferPtr>(data); }
+    bool is_opaque()  const { return std::holds_alternative<Opaque>(data); }
     bool is_closure() const { return std::holds_alternative<Closure>(data); }
     bool is_native()  const { return std::holds_alternative<NativeFn>(data); }
     bool is_nil()     const { return std::holds_alternative<std::nullptr_t>(data); }
@@ -113,6 +145,10 @@ struct Value {
     const DictMap& as_dict()     const { return *std::get<DictPtr>(data); }
     DictMap&       as_dict_mut() const { return *std::get<DictPtr>(data); }
     const DictPtr& as_dict_ptr() const { return std::get<DictPtr>(data); }
+    const Buffer&  as_buffer()        const { return *std::get<BufferPtr>(data); }
+    Buffer&        as_buffer_mut()    const { return *std::get<BufferPtr>(data); }
+    const BufferPtr& as_buffer_ptr()  const { return std::get<BufferPtr>(data); }
+    const Opaque&  as_opaque()   const { return std::get<Opaque>(data); }
     const Closure& as_closure()  const { return std::get<Closure>(data); }
     const NativeFn& as_native()  const { return std::get<NativeFn>(data); }
     double scalar() const { return as_vec()[0]; }
@@ -132,7 +168,8 @@ struct Value {
         if (is_str()) return !as_str().empty();
         if (is_list()) return !as_list().empty();
         if (is_dict()) return !as_dict().empty();
-        return true;
+        if (is_buffer()) return as_buffer().n_frames > 0;
+        return true;          // opaque, closure, native
     }
     static std::string fmt(double d) {
         auto s = std::to_string(d);
@@ -140,7 +177,13 @@ struct Value {
         if (s.back() == '.') s.pop_back();
         return s;
     }
+
+    // Cycle-aware repr. The visited set is per-call so simple repr() pays nothing.
     std::string repr() const {
+        std::unordered_set<const void*> seen;
+        return repr_with(seen);
+    }
+    std::string repr_with(std::unordered_set<const void*>& seen) const {
         if (is_nil()) return "nil";
         if (is_vec()) {
             auto& v = as_vec();
@@ -151,13 +194,22 @@ struct Value {
         }
         if (is_str()) return as_str();
         if (is_list()) {
+            const void* key = as_list_ptr().get();
+            if (seen.count(key)) return "(...)";
+            seen.insert(key);
             std::string r = "(";
             auto& l = as_list();
-            for (size_t i = 0; i < l.size(); ++i) { if (i) r += ", "; r += l[i].repr(); }
+            for (size_t i = 0; i < l.size(); ++i) {
+                if (i) r += ", ";
+                r += l[i].repr_with(seen);
+            }
+            seen.erase(key);
             return r + ")";
         }
         if (is_dict()) {
-            // Sort keys for deterministic, readable output.
+            const void* key = as_dict_ptr().get();
+            if (seen.count(key)) return "{...}";
+            seen.insert(key);
             auto& d = as_dict();
             std::vector<std::string> keys;
             keys.reserve(d.size());
@@ -166,19 +218,34 @@ struct Value {
             std::string r = "{";
             for (size_t i = 0; i < keys.size(); ++i) {
                 if (i) r += ", ";
-                r += keys[i] + ": " + d.at(keys[i]).repr();
+                r += keys[i] + ": " + d.at(keys[i]).repr_with(seen);
             }
+            seen.erase(key);
             return r + "}";
         }
-        if (is_closure()) return "<func>";
+        if (is_buffer()) {
+            auto& b = as_buffer();
+            return "<buffer " + std::to_string(b.n_frames) + "x" +
+                   std::to_string(b.n_channels) + " @ " + fmt(b.sample_rate) + "Hz>";
+        }
+        if (is_opaque()) return "<opaque:" + as_opaque().type_tag + ">";
+        if (is_closure()) {
+            auto& c = as_closure();
+            return c.name.empty() ? "<func>" : ("<func " + c.name + ">");
+        }
         if (is_native())  return "<native>";
         return "?";
     }
 
-    // Structural equality — recurses into lists and dicts. Closures and
-    // natives are never considered equal (their identity isn't observable
-    // here, since copies of a Value duplicate the underlying function object).
+    // Structural equality — recurses into lists and dicts. Buffers, opaques,
+    // closures, natives compare by identity (or are never-equal). Cycle-safe:
+    // revisiting an in-progress (a, b) pair returns true (Tarjan-style).
     static bool deep_eq(const Value& a, const Value& b) {
+        std::unordered_set<size_t> on_stack;
+        return deep_eq_with(a, b, on_stack);
+    }
+    static bool deep_eq_with(const Value& a, const Value& b,
+                             std::unordered_set<size_t>& on_stack) {
         if (a.is_nil()) return b.is_nil();
         if (b.is_nil()) return false;
         if (a.is_str()) return b.is_str() && a.as_str() == b.as_str();
@@ -193,26 +260,46 @@ struct Value {
         if (b.is_vec()) return false;
         if (a.is_list()) {
             if (!b.is_list()) return false;
+            size_t key = std::hash<const void*>{}(a.as_list_ptr().get())
+                       ^ (std::hash<const void*>{}(b.as_list_ptr().get()) << 1);
+            if (on_stack.count(key)) return true;        // co-inductive
+            on_stack.insert(key);
             auto& la = a.as_list(); auto& lb = b.as_list();
-            if (la.size() != lb.size()) return false;
-            for (size_t i = 0; i < la.size(); ++i)
-                if (!deep_eq(la[i], lb[i])) return false;
-            return true;
+            bool ok = la.size() == lb.size();
+            for (size_t i = 0; ok && i < la.size(); ++i)
+                ok = deep_eq_with(la[i], lb[i], on_stack);
+            on_stack.erase(key);
+            return ok;
         }
         if (b.is_list()) return false;
         if (a.is_dict()) {
             if (!b.is_dict()) return false;
+            size_t key = std::hash<const void*>{}(a.as_dict_ptr().get())
+                       ^ (std::hash<const void*>{}(b.as_dict_ptr().get()) << 1);
+            if (on_stack.count(key)) return true;
+            on_stack.insert(key);
             auto& da = a.as_dict(); auto& db = b.as_dict();
-            if (da.size() != db.size()) return false;
-            for (auto& kv : da) {
-                auto it = db.find(kv.first);
-                if (it == db.end()) return false;
-                if (!deep_eq(kv.second, it->second)) return false;
+            bool ok = da.size() == db.size();
+            for (auto it = da.begin(); ok && it != da.end(); ++it) {
+                auto jt = db.find(it->first);
+                if (jt == db.end()) { ok = false; break; }
+                ok = deep_eq_with(it->second, jt->second, on_stack);
             }
-            return true;
+            on_stack.erase(key);
+            return ok;
         }
         if (b.is_dict()) return false;
-        return false;
+        if (a.is_buffer()) {
+            return b.is_buffer() && a.as_buffer_ptr().get() == b.as_buffer_ptr().get();
+        }
+        if (b.is_buffer()) return false;
+        if (a.is_opaque()) {
+            return b.is_opaque()
+                && a.as_opaque().ptr.get() == b.as_opaque().ptr.get()
+                && a.as_opaque().type_tag == b.as_opaque().type_tag;
+        }
+        if (b.is_opaque()) return false;
+        return false;        // closures/natives never compare equal here
     }
 };
 
@@ -241,7 +328,7 @@ enum class Tk {
     Plus, Minus, Star, Slash, Percent, Eq, EqEq, Neq, Lt, Gt, Le, Ge,
     And, Or, Not, Comma, Semi, Dot, Colon, Eof,
     Var, Func, If, Else, While, For, In, Return, Break, Continue,
-    Print, Load, Try, Catch, Assert
+    Print, Load, Try, Catch, Finally, Assert
 };
 inline const char* tk_name(Tk t) {
     switch (t) {
@@ -288,6 +375,7 @@ inline const char* tk_name(Tk t) {
     case Tk::Load:     return "'load'";
     case Tk::Try:      return "'try'";
     case Tk::Catch:    return "'catch'";
+    case Tk::Finally:  return "'finally'";
     case Tk::Assert:   return "'assert'";
     }
     return "?";
@@ -423,7 +511,8 @@ struct Lexer {
                 {"return", Tk::Return}, {"break", Tk::Break}, {"continue", Tk::Continue},
                 {"print", Tk::Print}, {"load", Tk::Load},
                 {"and", Tk::And}, {"or", Tk::Or}, {"not", Tk::Not},
-                {"try", Tk::Try}, {"catch", Tk::Catch}, {"assert", Tk::Assert}
+                {"try", Tk::Try}, {"catch", Tk::Catch}, {"finally", Tk::Finally},
+                {"assert", Tk::Assert}
             };
             auto it = kw.find(id);
             return {it != kw.end() ? it->second : Tk::Id, id, ln};
@@ -708,13 +797,25 @@ struct Parser {
         eat(Tk::Try);
         auto e = make(NodeT::TryCatch, ln);
         e->body = parse_block();
-        eat(Tk::Catch);
-        eat(Tk::LPar);
-        e->str_val = eat(Tk::Id).text;     // catch variable name
-        eat(Tk::RPar);
-        auto bl = make(NodeT::Block, cur().line);
-        bl->body = parse_block();
-        e->right = bl;                     // catch block
+        // catch (var) { ... } and finally { ... } are both optional, but
+        // at least one of them must follow `try { ... }`.
+        if (check(Tk::Catch)) {
+            ++pos;
+            eat(Tk::LPar);
+            e->str_val = eat(Tk::Id).text;     // catch variable name
+            eat(Tk::RPar);
+            auto bl = make(NodeT::Block, cur().line);
+            bl->body = parse_block();
+            e->right = bl;                     // catch block
+        }
+        if (check(Tk::Finally)) {
+            ++pos;
+            auto fl = make(NodeT::Block, cur().line);
+            fl->body = parse_block();
+            e->args.push_back(fl);             // finally block in args[0]
+        }
+        if (!e->right && e->args.empty())
+            err(*file, ln, "try requires a 'catch' or 'finally' clause");
         return e;
     }
     ExprPtr parse_print() {
@@ -752,8 +853,11 @@ struct Parser {
                 eat(Tk::Eq);
                 auto a = make(NodeT::IndexAssign, ln);
                 a->left  = e->left;                 // target
-                a->right = e->right;                // index
-                a->args.push_back(parse_expr());    // value
+                a->right = e->right;                // first index
+                // Carry through any extra (multi-dim) indices, then the value.
+                // Layout in a->args: [extra_indices..., value]
+                for (auto& extra : e->args) a->args.push_back(extra);
+                a->args.push_back(parse_expr());
                 return a;
             }
             if (e->type == NodeT::Member) {
@@ -874,7 +978,9 @@ struct Parser {
                 eat(Tk::LBrack);
                 auto idx = make(NodeT::Index, ln);
                 idx->left = l;
-                idx->right = parse_expr();
+                idx->right = parse_expr();         // first index
+                while (match(Tk::Comma))           // optional extra indices
+                    idx->args.push_back(parse_expr());
                 eat(Tk::RBrack);
                 l = idx;
             } else if (check(Tk::Dot)) {
@@ -959,6 +1065,7 @@ struct Interpreter {
     YieldFn yield_fn;                                // cooperative-scheduling hook
     std::vector<std::weak_ptr<Env>> tracked_envs;    // for cycle breaking at shutdown
     std::unordered_set<std::string> loaded_files;    // load() memoization & cycle break
+    std::unordered_map<std::string, std::string> native_docs;   // for help()
     std::mt19937_64 rng;                             // single source of randomness
 
     Interpreter() {
@@ -1032,8 +1139,17 @@ struct Interpreter {
     void reg(const char* name, NativeFn fn) {
         global->def(name, Value(std::move(fn)));
     }
+    // Register a native with an attached docstring (retrievable via help()).
+    void reg_doc(const char* name, const std::string& doc, NativeFn fn) {
+        native_docs[name] = doc;
+        global->def(name, Value(std::move(fn)));
+    }
     // Public hook for hosts to register additional builtins after construction.
     void register_builtin(const std::string& name, NativeFn fn) {
+        global->def(name, Value(std::move(fn)));
+    }
+    void register_builtin(const std::string& name, const std::string& doc, NativeFn fn) {
+        native_docs[name] = doc;
         global->def(name, Value(std::move(fn)));
     }
 
@@ -1114,10 +1230,11 @@ struct Interpreter {
         // ── polymorphic: len, reverse ─────────────────────────────────
         reg("len", [](auto& a, int ln, auto& f) -> Value {
             ck("len", a, 1, ln, f);
-            if (a[0].is_vec())  return Value((double)a[0].as_vec().size());
-            if (a[0].is_str())  return Value((double)a[0].as_str().size());
-            if (a[0].is_list()) return Value((double)a[0].as_list().size());
-            if (a[0].is_dict()) return Value((double)a[0].as_dict().size());
+            if (a[0].is_vec())    return Value((double)a[0].as_vec().size());
+            if (a[0].is_str())    return Value((double)a[0].as_str().size());
+            if (a[0].is_list())   return Value((double)a[0].as_list().size());
+            if (a[0].is_dict())   return Value((double)a[0].as_dict().size());
+            if (a[0].is_buffer()) return Value((double)a[0].as_buffer().n_frames);
             err(f, ln, "len: unsupported type");
         });
 
@@ -1359,10 +1476,11 @@ struct Interpreter {
         });
         reg("copy", [](auto& a, int ln, auto& f) -> Value {
             ck("copy", a, 1, ln, f);
-            if (a[0].is_list()) return Value(List(a[0].as_list()));
-            if (a[0].is_vec())  return Value(Vec(a[0].as_vec()));
-            if (a[0].is_str())  return Value(Str(a[0].as_str()));
-            if (a[0].is_dict()) return Value(std::make_shared<DictMap>(a[0].as_dict()));
+            if (a[0].is_list())   return Value(List(a[0].as_list()));
+            if (a[0].is_vec())    return Value(Vec(a[0].as_vec()));
+            if (a[0].is_str())    return Value(Str(a[0].as_str()));
+            if (a[0].is_dict())   return Value(std::make_shared<DictMap>(a[0].as_dict()));
+            if (a[0].is_buffer()) return Value(std::make_shared<Buffer>(a[0].as_buffer()));
             return a[0];
         });
 
@@ -1587,10 +1705,12 @@ struct Interpreter {
             ck("type", a, 1, ln, f);
             if (a[0].is_nil()) return Value(Str("nil"));
             if (a[0].is_vec() && a[0].as_vec().size() == 1) return Value(Str("scalar"));
-            if (a[0].is_vec())  return Value(Str("vec"));
-            if (a[0].is_str())  return Value(Str("string"));
-            if (a[0].is_list()) return Value(Str("list"));
-            if (a[0].is_dict()) return Value(Str("dict"));
+            if (a[0].is_vec())    return Value(Str("vec"));
+            if (a[0].is_str())    return Value(Str("string"));
+            if (a[0].is_list())   return Value(Str("list"));
+            if (a[0].is_dict())   return Value(Str("dict"));
+            if (a[0].is_buffer()) return Value(Str("buffer"));
+            if (a[0].is_opaque()) return Value(Str("opaque"));
             return Value(Str("func"));
         });
         reg("str", [](auto& a, int ln, auto& f) -> Value {
@@ -1729,6 +1849,123 @@ struct Interpreter {
             return Value(Str(line));
         });
 
+        // ── buffer (audio) ────────────────────────────────────────────
+        // buffer(frames)              — mono, default sample rate
+        // buffer(frames, channels)    — multi-channel, default sample rate
+        // buffer(frames, channels, sr)
+        reg_doc("buffer",
+                "buffer(frames [, channels [, sample_rate]]) — allocate an audio buffer (interleaved, doubles).",
+                [](auto& a, int ln, auto& f) -> Value {
+            if (a.size() < 1 || a.size() > 3)
+                err(f, ln, "buffer expects 1-3 args (frames [, channels [, sample_rate]])");
+            for (auto& x : a) nv("buffer", x, ln, f);
+            auto b = std::make_shared<Buffer>();
+            b->n_frames    = (size_t)std::max(0.0, a[0].scalar());
+            b->n_channels  = a.size() >= 2 ? (size_t)std::max(1.0, a[1].scalar()) : 1;
+            b->sample_rate = a.size() >= 3 ? a[2].scalar() : 44100.0;
+            b->data.assign(b->n_frames * b->n_channels, 0.0);
+            return Value(b);
+        });
+        reg_doc("frames", "frames(buffer) — number of frames.",
+                [](auto& a, int ln, auto& f) -> Value {
+            ck("frames", a, 1, ln, f);
+            if (!a[0].is_buffer()) err(f, ln, "frames expects buffer");
+            return Value((double)a[0].as_buffer().n_frames);
+        });
+        reg_doc("channels", "channels(buffer) — number of channels.",
+                [](auto& a, int ln, auto& f) -> Value {
+            ck("channels", a, 1, ln, f);
+            if (!a[0].is_buffer()) err(f, ln, "channels expects buffer");
+            return Value((double)a[0].as_buffer().n_channels);
+        });
+        reg_doc("sample_rate", "sample_rate(buffer) — sample rate in Hz.",
+                [](auto& a, int ln, auto& f) -> Value {
+            ck("sample_rate", a, 1, ln, f);
+            if (!a[0].is_buffer()) err(f, ln, "sample_rate expects buffer");
+            return Value(a[0].as_buffer().sample_rate);
+        });
+        // Convert a mono buffer to a Vec (for arithmetic / DSP in flux).
+        reg_doc("buffer_to_vec",
+                "buffer_to_vec(buffer) — return Vec of all samples (interleaved if multi-channel).",
+                [](auto& a, int ln, auto& f) -> Value {
+            ck("buffer_to_vec", a, 1, ln, f);
+            if (!a[0].is_buffer()) err(f, ln, "buffer_to_vec expects buffer");
+            auto& b = a[0].as_buffer();
+            Vec v(b.data.size());
+            for (size_t i = 0; i < b.data.size(); ++i) v[i] = b.data[i];
+            return Value(v);
+        });
+        // Build a mono buffer from a Vec.
+        reg_doc("vec_to_buffer",
+                "vec_to_buffer(vec [, sample_rate]) — build a mono buffer from a Vec.",
+                [](auto& a, int ln, auto& f) -> Value {
+            if (a.size() < 1 || a.size() > 2) err(f, ln, "vec_to_buffer expects 1 or 2 args");
+            if (!a[0].is_vec()) err(f, ln, "vec_to_buffer expects vec");
+            auto b = std::make_shared<Buffer>();
+            auto& v = a[0].as_vec();
+            b->n_frames = v.size();
+            b->n_channels = 1;
+            b->sample_rate = a.size() == 2 ? (nv("vec_to_buffer", a[1], ln, f), a[1].scalar())
+                                           : 44100.0;
+            b->data.assign(v.size(), 0.0);
+            for (size_t i = 0; i < v.size(); ++i) b->data[i] = v[i];
+            return Value(b);
+        });
+
+        // ── opaque ────────────────────────────────────────────────────
+        // No constructor from Flux: opaques originate in C++ host code.
+        // Flux can only inspect the type tag and pass them around.
+        reg_doc("opaque_type",
+                "opaque_type(opaque) — return the type tag string of an opaque value.",
+                [](auto& a, int ln, auto& f) -> Value {
+            ck("opaque_type", a, 1, ln, f);
+            if (!a[0].is_opaque()) err(f, ln, "opaque_type expects opaque");
+            return Value(Str(a[0].as_opaque().type_tag));
+        });
+
+        // ── help & introspection ──────────────────────────────────────
+        reg_doc("help",
+                "help(fn|name) — return docstring for a closure or named native.",
+                [this](auto& a, int ln, auto& f) -> Value {
+            ck("help", a, 1, ln, f);
+            if (a[0].is_closure()) {
+                auto& c = a[0].as_closure();
+                if (c.doc.empty() && !c.name.empty()) {
+                    // Try the native_docs registry by closure name as a fallback.
+                    auto it = native_docs.find(c.name);
+                    if (it != native_docs.end()) return Value(Str(it->second));
+                }
+                return Value(Str(c.doc.empty() ? "<no documentation>" : c.doc));
+            }
+            if (a[0].is_native()) {
+                return Value(Str("<native function — call help with its name as a string>"));
+            }
+            if (a[0].is_str()) {
+                auto& name = a[0].as_str();
+                auto it = native_docs.find(name);
+                if (it != native_docs.end()) return Value(Str(it->second));
+                // Look the name up in the global env in case it's a closure.
+                auto* v = global->find(name);
+                if (v && v->is_closure()) {
+                    auto& c = v->as_closure();
+                    return Value(Str(c.doc.empty() ? "<no documentation>" : c.doc));
+                }
+                return Value(Str("<no documentation for: " + name + ">"));
+            }
+            err(f, ln, "help expects a function or its name as a string");
+        });
+
+        // bench(thunk) — call thunk() and return the wall-clock seconds it took.
+        reg_doc("bench",
+                "bench(thunk) — call thunk() and return elapsed wall-clock seconds.",
+                [this](auto& a, int ln, auto& f) -> Value {
+            ck("bench", a, 1, ln, f); nf("bench", a[0], ln, f);
+            auto t0 = std::chrono::high_resolution_clock::now();
+            call_value(a[0], {}, ln, f);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            return Value(std::chrono::duration<double>(t1 - t0).count());
+        });
+
         // ── constants ─────────────────────────────────────────────────
         global->def("pi",    Value(3.14159265358979323846));
         global->def("e",     Value(2.71828182845904523536));
@@ -1736,6 +1973,7 @@ struct Interpreter {
         global->def("nil",   Value(nullptr));
         global->def("true",  Value(1.0));
         global->def("false", Value(0.0));
+        global->def("flux_version", Value(Str(FLUX_VERSION)));
     }
 
     // ── broadcast binary op ───────────────────────────────────────────
@@ -1786,6 +2024,9 @@ struct Interpreter {
             return p;
         }
         if (e->type == NodeT::Index) {
+            if (!e->args.empty())
+                err(e->src_file(), e->line,
+                    "multi-index can only appear in the terminal position of an assignment");
             Value* outer = eval_lvalue(e->left, env);
             Value idx_v = eval(e->right, env);
             if (outer->is_list()) {
@@ -1818,6 +2059,44 @@ struct Interpreter {
             return &it->second;
         }
         err(e->src_file(), e->line, "invalid assignment target");
+    }
+
+    void apply_buffer_assign(Value& container, const std::vector<Value>& indices,
+                             Value val, int ln, const std::string& f) {
+        auto& b = container.as_buffer_mut();
+        if (indices.size() == 1) {
+            if (!indices[0].is_vec()) err(f, ln, "buffer index must be numeric");
+            int i = (int)indices[0].scalar();
+            if (i < 0) i += (int)b.n_frames;
+            if (i < 0 || i >= (int)b.n_frames) err(f, ln, "buffer frame index out of range");
+            if (b.n_channels == 1) {
+                if (!val.is_vec() || val.as_vec().size() != 1)
+                    err(f, ln, "mono buffer assignment requires a scalar");
+                b.data[i] = val.scalar();
+            } else {
+                if (!val.is_vec() || val.as_vec().size() != b.n_channels)
+                    err(f, ln, "multichannel buffer frame assignment requires vec of size n_channels");
+                auto& v = val.as_vec();
+                for (size_t c = 0; c < b.n_channels; ++c)
+                    b.data[i * b.n_channels + c] = v[c];
+            }
+            return;
+        }
+        if (indices.size() == 2) {
+            if (!indices[0].is_vec() || !indices[1].is_vec())
+                err(f, ln, "buffer indices must be numeric");
+            int i = (int)indices[0].scalar();
+            int c = (int)indices[1].scalar();
+            if (i < 0) i += (int)b.n_frames;
+            if (c < 0) c += (int)b.n_channels;
+            if (i < 0 || i >= (int)b.n_frames) err(f, ln, "buffer frame index out of range");
+            if (c < 0 || c >= (int)b.n_channels) err(f, ln, "buffer channel index out of range");
+            if (!val.is_vec() || val.as_vec().size() != 1)
+                err(f, ln, "buffer element assignment requires a scalar");
+            b.data[i * b.n_channels + c] = val.scalar();
+            return;
+        }
+        err(f, ln, "buffer assignment expects 1 or 2 indices");
     }
 
     void apply_index_assign(Value& container, const Value& idx, Value val,
@@ -1948,7 +2227,45 @@ struct Interpreter {
         }
         case NodeT::Index: {
             auto obj = eval(e->left, env);
-            auto idx = eval(e->right, env);
+            // Collect indices: e->right is first, e->args carry any extras
+            // produced by `x[i, j, ...]` syntax.
+            std::vector<Value> indices;
+            indices.reserve(1 + e->args.size());
+            indices.push_back(eval(e->right, env));
+            for (auto& a : e->args) indices.push_back(eval(a, env));
+
+            // Buffer: 1 or 2 indices.
+            if (obj.is_buffer()) {
+                auto& b = obj.as_buffer();
+                if (indices.size() == 1) {
+                    if (!indices[0].is_vec()) err(f, ln, "buffer index must be numeric");
+                    int i = (int)indices[0].scalar();
+                    if (i < 0) i += (int)b.n_frames;
+                    if (i < 0 || i >= (int)b.n_frames) err(f, ln, "buffer frame index out of range");
+                    if (b.n_channels == 1) return Value(b.data[i]);
+                    Vec v(b.n_channels);
+                    for (size_t c = 0; c < b.n_channels; ++c)
+                        v[c] = b.data[i * b.n_channels + c];
+                    return Value(v);
+                }
+                if (indices.size() == 2) {
+                    if (!indices[0].is_vec() || !indices[1].is_vec())
+                        err(f, ln, "buffer indices must be numeric");
+                    int i = (int)indices[0].scalar();
+                    int c = (int)indices[1].scalar();
+                    if (i < 0) i += (int)b.n_frames;
+                    if (c < 0) c += (int)b.n_channels;
+                    if (i < 0 || i >= (int)b.n_frames) err(f, ln, "buffer frame index out of range");
+                    if (c < 0 || c >= (int)b.n_channels) err(f, ln, "buffer channel index out of range");
+                    return Value(b.data[i * b.n_channels + c]);
+                }
+                err(f, ln, "buffer expects 1 or 2 indices");
+            }
+
+            // Single-index path for vec, list, string, dict.
+            if (indices.size() != 1)
+                err(f, ln, "multi-index access only supported on buffer");
+            auto& idx = indices[0];
             if (obj.is_vec()) {
                 if (!idx.is_vec()) err(f, ln, "vec index must be numeric");
                 int i = (int)idx.scalar();
@@ -1999,14 +2316,34 @@ struct Interpreter {
             return v;
         }
         case NodeT::IndexAssign: {
+            // Layout: e->right is the first index, e->args is
+            // [extra_indices..., value]. Single-dim case has args = [value].
             // Evaluate value first (matches typical right-to-left store
             // ordering and avoids mutating through a stale lvalue if the
             // value-eval errs).
-            Value val = eval(e->args[0], env);
-            Value idx = eval(e->right, env);
-            Value* target = eval_lvalue(e->left, env);
-            apply_index_assign(*target, idx, std::move(val), ln, f);
-            return *target;
+            Value val = eval(e->args.back(), env);
+            std::vector<Value> indices;
+            indices.reserve(e->args.size());           // first + extras
+            indices.push_back(eval(e->right, env));
+            for (size_t i = 0; i + 1 < e->args.size(); ++i)
+                indices.push_back(eval(e->args[i], env));
+
+            // Buffer assignment is multi-dim aware. For other types the
+            // intermediate steps in eval_lvalue already restrict to single
+            // index, so we only need a multi-dim path for buffer here.
+            if (e->left->type == NodeT::Id || e->left->type == NodeT::Member ||
+                e->left->type == NodeT::Index) {
+                Value* target = eval_lvalue(e->left, env);
+                if (target->is_buffer()) {
+                    apply_buffer_assign(*target, indices, std::move(val), ln, f);
+                    return *target;
+                }
+                if (indices.size() != 1)
+                    err(f, ln, "multi-index assignment only supported on buffer");
+                apply_index_assign(*target, indices[0], std::move(val), ln, f);
+                return *target;
+            }
+            err(f, ln, "invalid assignment target");
         }
         case NodeT::FuncDecl: {
             Closure cl;
@@ -2015,6 +2352,14 @@ struct Interpreter {
             cl.body = e->body;
             cl.env = env;
             cl.origin = e.get();
+            // Docstring: a string literal as the first statement of the body
+            // becomes the closure's documentation. The string still evaluates
+            // at runtime as a no-op statement — keeping it in the body keeps
+            // line numbers stable and the AST rendering faithful.
+            if (!cl.body.empty() && cl.body[0].expr &&
+                cl.body[0].expr->type == NodeT::Str) {
+                cl.doc = cl.body[0].expr->str_val;
+            }
             // Statement-form named functions get bound into env. The parser
             // ensures expression-form functions can never have names.
             if (!e->str_val.empty()) env->def(e->str_val, Value(cl));
@@ -2096,8 +2441,24 @@ struct Interpreter {
                         yield();
                         try { run_iter(Value(Str(k))); } catch (BreakSignal&) { break; }
                     }
+                } else if (coll.is_buffer()) {
+                    // Yield per-frame values: scalar for mono, vec for multichannel.
+                    auto& b = coll.as_buffer();
+                    for (size_t i = 0; i < b.n_frames; ++i) {
+                        yield();
+                        Value frame_val;
+                        if (b.n_channels == 1) {
+                            frame_val = Value(b.data[i]);
+                        } else {
+                            Vec v(b.n_channels);
+                            for (size_t c = 0; c < b.n_channels; ++c)
+                                v[c] = b.data[i * b.n_channels + c];
+                            frame_val = Value(v);
+                        }
+                        try { run_iter(std::move(frame_val)); } catch (BreakSignal&) { break; }
+                    }
                 } else {
-                    err(f, ln, "for-in requires list, vec, string, or dict");
+                    err(f, ln, "for-in requires list, vec, string, dict, or buffer");
                 }
             } catch (...) { --loop_depth; throw; }
             --loop_depth;
@@ -2155,22 +2516,52 @@ struct Interpreter {
             return Value(nullptr);
         }
         case NodeT::TryCatch: {
+            // Layout:
+            //   e->body    — try block
+            //   e->right   — catch block (Block expr) or null
+            //   e->str_val — catch variable name (if catch present)
+            //   e->args[0] — finally block (Block expr) or absent
+            std::exception_ptr saved;
             try {
                 exec_block(e->body, make_env(env));
             } catch (Error& err_obj) {
-                auto catch_scope = make_env(env);
-                auto d = std::make_shared<DictMap>();
-                (*d)["message"] = Value(Str(err_obj.msg));
-                (*d)["file"]    = Value(Str(err_obj.file));
-                (*d)["line"]    = Value((double)err_obj.line);
-                List trace_list;
-                for (auto& t : err_obj.trace) trace_list.push_back(Value(Str(t)));
-                (*d)["trace"]   = Value(std::move(trace_list));
-                catch_scope->def(e->str_val, Value(d));
-                exec_block(e->right->body, catch_scope);
+                if (e->right) {
+                    auto catch_scope = make_env(env);
+                    auto d = std::make_shared<DictMap>();
+                    (*d)["message"] = Value(Str(err_obj.msg));
+                    (*d)["file"]    = Value(Str(err_obj.file));
+                    (*d)["line"]    = Value((double)err_obj.line);
+                    List trace_list;
+                    for (auto& t : err_obj.trace) trace_list.push_back(Value(Str(t)));
+                    (*d)["trace"]   = Value(std::move(trace_list));
+                    catch_scope->def(e->str_val, Value(d));
+                    try {
+                        exec_block(e->right->body, catch_scope);
+                    } catch (...) {
+                        saved = std::current_exception();
+                    }
+                } else {
+                    // No catch — save the error to rethrow after finally.
+                    saved = std::current_exception();
+                }
+            } catch (...) {
+                // Return / Break / Continue / TailCall: control flow, not
+                // errors. Save and rethrow after running finally so cleanup
+                // still happens before the function returns or the loop breaks.
+                saved = std::current_exception();
             }
-            // ReturnSignal, BreakSignal, ContinueSignal, TailCall are NOT
-            // caught here — they are control-flow primitives, not errors.
+
+            if (!e->args.empty()) {
+                // Finally always runs. If finally itself throws, that
+                // exception replaces any saved one (matches Java/Python).
+                try {
+                    exec_block(e->args[0]->body, make_env(env));
+                } catch (...) {
+                    saved = std::current_exception();
+                }
+            }
+
+            if (saved) std::rethrow_exception(saved);
             return Value(nullptr);
         }
         case NodeT::LoadStmt: {

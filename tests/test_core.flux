@@ -612,6 +612,198 @@ c */ 3  bc2") == 3)
 ok("# comment",           eval("var bc3 = 5  # tail
 bc3") == 5)
 
+# ── Buffers ───────────────────────────────────────────────────────────
+section("Buffers")
+var b1 = buffer(100)
+ok("mono buffer len",     len(b1) == 100)
+ok("mono buffer chans",   channels(b1) == 1)
+ok("default sr",          sample_rate(b1) == 44100)
+ok("mono buf zero init",  b1[0] == 0)
+ok("mono buf zero last",  b1[-1] == 0)
+
+# Mono indexing & assignment
+b1[0] = 0.5
+b1[1] = -0.5
+b1[-1] = 1
+ok("mono write",          b1[0] == 0.5)
+ok("mono neg write",      b1[-1] == 1)
+ok("mono mid",            b1[1] == -0.5)
+
+# Multi-channel buffer
+var b2 = buffer(10, 2, 48000)
+ok("stereo frames",       frames(b2) == 10)
+ok("stereo channels",     channels(b2) == 2)
+ok("stereo sr",           sample_rate(b2) == 48000)
+ok("stereo type",         type(b2) == "buffer")
+
+# Multi-channel indexing
+b2[0, 0] = 0.1
+b2[0, 1] = 0.2
+b2[1, 0] = 0.3
+b2[1, 1] = 0.4
+ok("stereo [0,0]",        b2[0, 0] == 0.1)
+ok("stereo [0,1]",        b2[0, 1] == 0.2)
+ok("stereo [1,0]",        b2[1, 0] == 0.3)
+ok("stereo [1,1]",        b2[1, 1] == 0.4)
+
+# Single-index on multichannel returns vec of all channels for that frame
+var frame0 = b2[0]
+ok("frame is vec",        type(frame0) == "vec")
+ok("frame size = chans",  len(frame0) == 2)
+ok("frame contents",      frame0 == [0.1, 0.2])
+
+# Frame-vec assignment
+b2[2] = [0.7, 0.8]
+ok("frame vec assign 0",  b2[2, 0] == 0.7)
+ok("frame vec assign 1",  b2[2, 1] == 0.8)
+
+# Iteration
+var b3 = buffer(4)
+b3[0] = 1
+b3[1] = 2
+b3[2] = 3
+b3[3] = 4
+var s = 0
+for (var x in b3) { s = s + x }
+ok("for-in mono buf",     s == 10)
+
+# Conversions
+var v_round = buffer_to_vec(b3)
+ok("buffer_to_vec",       v_round == [1, 2, 3, 4])
+
+var b4 = vec_to_buffer([10, 20, 30], 96000)
+ok("vec_to_buffer chan",  channels(b4) == 1)
+ok("vec_to_buffer sr",    sample_rate(b4) == 96000)
+ok("vec_to_buffer data",  b4[0] == 10 and b4[1] == 20 and b4[2] == 30)
+
+# Reference vs copy
+var ba = buffer(5)
+var bb = ba          # shares
+bb[0] = 99
+ok("buffer shares ref",   ba[0] == 99)
+var bc = copy(ba)
+bc[0] = 0
+ok("buffer copy detached", ba[0] == 99 and bc[0] == 0)
+
+# Errors
+expect_err("buf out of range", func() { var b = buffer(5)  return b[10] })
+expect_err("buf chan oob",     func() { var b = buffer(5, 2)  return b[0, 5] })
+expect_err("multi-idx on vec", func() { return [1, 2, 3][0, 1] })
+expect_err("scalar to multich", func() { var b = buffer(5, 2)  b[0] = 1.0  return 0 })
+
+# ── try/finally ───────────────────────────────────────────────────────
+section("try/finally")
+
+# finally runs after normal completion of try
+var tf1 = list()
+try { push(tf1, "try") } finally { push(tf1, "finally") }
+ok("finally after try",   tf1 == list("try", "finally"))
+
+# finally runs after caught error
+var tf2 = list()
+try {
+    push(tf2, "try")
+    error("oops")
+} catch (e) {
+    push(tf2, "catch")
+} finally {
+    push(tf2, "finally")
+}
+ok("finally after catch", tf2 == list("try", "catch", "finally"))
+
+# finally runs even when there's no catch and the error propagates
+var tf3 = list()
+var caught_outer = nil
+try {
+    try {
+        push(tf3, "inner-try")
+        error("propagate")
+    } finally {
+        push(tf3, "inner-finally")
+    }
+} catch (e) {
+    caught_outer = e.message
+}
+ok("finally w/o catch",   tf3 == list("inner-try", "inner-finally"))
+ok("error reaches outer", caught_outer == "propagate")
+
+# finally runs even when try returns from a function
+func tries_return() {
+    var log = list()
+    try {
+        push(log, "before")
+        return log
+    } finally {
+        push(log, "finally")
+    }
+}
+var ret_log = tries_return()
+ok("finally after return", ret_log == list("before", "finally"))
+
+# try with only finally (no catch)
+var tf4 = 0
+try { tf4 = 1 } finally { tf4 = tf4 + 10 }
+ok("try-finally only",    tf4 == 11)
+
+# try with neither catch nor finally is a parse error
+expect_err("try no clauses", func() { eval("try { var x = 1 }") })
+
+# ── Cycle protection ──────────────────────────────────────────────────
+section("Cycle protection")
+var cl = list(1, 2)
+push(cl, cl)            # self-referential list
+# repr must not stack-overflow
+ok("repr cyclic list",    find(str(cl), "...") >= 0)
+
+var cd = {a: 1}
+cd.self = cd            # self-referential dict
+ok("repr cyclic dict",    find(str(cd), "...") >= 0)
+
+# Length still works
+ok("len cyclic list",     len(cl) == 3)
+
+# Mutual cycle through dicts
+var ca = {tag: "a"}
+var cb = {tag: "b"}
+ca.peer = cb
+cb.peer = ca
+ok("repr mutual cycle",   find(str(ca), "...") >= 0)
+
+# Equality on cyclic data does not loop forever (co-inductive)
+var ce1 = list(1)
+var ce2 = list(1)
+push(ce1, ce1)
+push(ce2, ce2)
+ok("eq on cyclic lists",  ce1 == ce2)
+
+# ── Docstrings & help() ───────────────────────────────────────────────
+section("Docstrings & help()")
+func documented(x) {
+    "Square the input."
+    return x * x
+}
+func undocumented(x) { return x + 1 }
+
+ok("help on doc'd",       help(documented) == "Square the input.")
+ok("help on plain",       help(undocumented) == "<no documentation>")
+ok("help by name str",    help("documented") == "Square the input.")
+ok("help on native",      find(help("buffer"), "audio buffer") >= 0)
+ok("help missing native", find(help("not_a_real_fn"), "no documentation") >= 0)
+
+# Function still runs the docstring as a no-op stmt
+ok("doc'd fn still works", documented(7) == 49)
+
+# ── Versioning ────────────────────────────────────────────────────────
+section("Versioning")
+ok("flux_version is str", type(flux_version) == "string")
+ok("flux_version shape",  find(flux_version, ".") > 0)
+
+# ── bench ─────────────────────────────────────────────────────────────
+section("bench")
+var t = bench(func() { sum_to(1000, 0) })
+ok("bench is scalar",     type(t) == "scalar")
+ok("bench is non-neg",    t >= 0)
+
 # ── Cleanup ───────────────────────────────────────────────────────────
 exec("rm -f test_io.tmp")
 

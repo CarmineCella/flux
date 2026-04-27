@@ -358,9 +358,9 @@ else              { print "  positive:" n }
 
 # while
 var i = 0
-var sum = 0
-while (i < 5) { sum = sum + i  i = i + 1 }
-print "  while sum 0..4 =>" sum
+var acc = 0
+while (i < 5) { acc = acc + i  i = i + 1 }
+print "  while sum 0..4 =>" acc
 
 # C-style for
 var prod = 1
@@ -708,6 +708,162 @@ exec("rm -f greet.flux")
 print ""
 print "══ § 26. Cooperative scheduling ══════════════════"
 print "  (host-side: see Interpreter::set_yield in flux.h)"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 27. Buffers — first-class audio
+# ──────────────────────────────────────────────────────────────────────
+# A Buffer holds an interleaved array of doubles plus n_frames,
+# n_channels, and sample_rate. It is reference-shared (like list and
+# dict). Index it as buf[i] (returns scalar for mono, vec for
+# multichannel) or buf[i, c] (always scalar). `for f in buf` iterates
+# per-frame values. Convert with buffer_to_vec / vec_to_buffer.
+#
+# Buffers are intended to be the bridge between Flux and host C++ DSP
+# code: hosts allocate them, fill them with `read_audio(...)`-style
+# native functions, and pass them back for analysis or transformation.
+
+print ""
+print "══ § 27. Buffers ═════════════════════════════════"
+var buf = buffer(8, 2, 48000)        # 8 frames, stereo, 48 kHz
+print "  buf            =>" buf
+print "  frames         =>" frames(buf)
+print "  channels       =>" channels(buf)
+print "  sample_rate    =>" sample_rate(buf)
+
+# Element write
+buf[0, 0] = 0.5  buf[0, 1] = -0.5
+buf[1, 0] = 0.7  buf[1, 1] = -0.7
+print "  buf[0]         =>" buf[0]            # vec [0.5, -0.5]
+print "  buf[1, 0]      =>" buf[1, 0]
+print "  len(buf)       =>" len(buf)
+
+# Whole-frame assignment with a vec
+buf[2] = [0.1, 0.9]
+print "  buf[2] = [..]  =>" buf[2]
+
+# Iteration
+var summed = 0
+for (var fr in buf) { summed = summed + sum(fr) }
+print "  sum of frames  =>" summed
+
+# Conversions
+var v = vec_to_buffer([1, 2, 3, 4], 22050)
+print "  vec→buffer     =>" buffer_to_vec(v)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 28. Opaque — host-side handles
+# ──────────────────────────────────────────────────────────────────────
+# Opaque values wrap a `shared_ptr<void>` plus a type tag. They are
+# created by the C++ host (FFT plans, file handles, ML model weights,
+# audio streams, …). From Flux you can pass them around, store them in
+# dicts, ask their type tag, and hand them back to native functions.
+# They are intentionally inert from the Flux side.
+#
+# (This section just shows what they print as; you'll create real ones
+# from C++ via:
+#     interp.register_builtin("make_plan", [](...){
+#         return flux::Value(flux::Opaque{"fft_plan",
+#                            std::make_shared<MyPlan>(...)});
+#     });
+# )
+
+print ""
+print "══ § 28. Opaque (host-side) ══════════════════════"
+print "  no Flux-side constructor — host C++ creates them"
+print "  type(x) returns \"opaque\"; opaque_type(x) returns the tag"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 29. try / finally
+# ──────────────────────────────────────────────────────────────────────
+# `finally` is RAII for Flux. The block runs whether the try succeeded,
+# threw an error caught by `catch`, threw an uncaught error, or even
+# `return`ed out of an enclosing function. If `finally` itself throws,
+# its exception replaces any saved one (matches Java/Python semantics).
+# `catch` and `finally` are both optional, but at least one must be
+# present after a try.
+
+print ""
+print "══ § 29. try / finally ═══════════════════════════"
+
+# Cleanup pattern: ensure a buffer is "released" (here, just logged)
+# regardless of how the try block exits.
+func process() {
+    var log = list()
+    try {
+        push(log, "open")
+        return list("ok", log)
+    } finally {
+        push(log, "close")
+    }
+}
+print "  process()      =>" process()
+
+# Catch + finally
+var seq = list()
+try {
+    push(seq, "try")
+    error("fail")
+} catch (e) {
+    push(seq, "catch")
+} finally {
+    push(seq, "finally")
+}
+print "  catch+finally  =>" seq
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 30. Docstrings & help()
+# ──────────────────────────────────────────────────────────────────────
+# A string literal as the first statement of a function body is captured
+# as its documentation. help(fn) returns it; help("name") looks up
+# native builtins by name. Use this to make libraries self-documenting.
+
+print ""
+print "══ § 30. Docstrings & help() ═════════════════════"
+
+func add(a, b) {
+    "Sum two scalars."
+    return a + b
+}
+print "  help(add)      =>" help(add)
+print "  help(\"buffer\") =>" help("buffer")
+print "  help(\"sin\")    =>" help("sin")           # no doc registered for sin
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 31. Cycle protection
+# ──────────────────────────────────────────────────────────────────────
+# Self-referential lists and dicts now have well-defined repr() and
+# equality — no more stack overflow on legitimate-looking data.
+
+print ""
+print "══ § 31. Cycle protection ════════════════════════"
+var cyc = list(1, 2)
+push(cyc, cyc)
+print "  cyclic list    =>" cyc                  # (1, 2, (...))
+
+var cdict = {tag: "self"}
+cdict.me = cdict
+print "  cyclic dict    =>" cdict                # {me: {...}, tag: self}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 32. bench / version
+# ──────────────────────────────────────────────────────────────────────
+# bench(thunk) returns the wall-clock seconds taken to run the thunk.
+# `flux_version` is a global string constant.
+
+print ""
+print "══ § 32. bench & version ═════════════════════════"
+print "  flux_version   =>" flux_version
+var t = bench(func() {
+    var s = 0
+    for (var i in range(10000)) { s = s + i }
+})
+print "  10k loop took  =>" t "seconds"
 
 
 # ════════════════════════════════════════════════════════════════════════
