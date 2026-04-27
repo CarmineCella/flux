@@ -1263,22 +1263,26 @@ struct Interpreter {
     void set_yield(YieldFn fn) { yield_fn = std::move(fn); }
 
     // ── guards ────────────────────────────────────────────────────────
+    // These predate reg_typed and remain useful for builtins that accept
+    // multiple shapes (where reg_typed's signature would be too coarse).
+    // Messages name both the expected and the received type so they read
+    // the same as reg_typed-generated diagnostics.
     static void ck(const char* nm, const std::vector<Value>& a, size_t n, int ln, const std::string& f) {
-        if (a.size() != n) err(f, ln, std::string(nm) + " expects " + std::to_string(n) +
+        if (a.size() != n) err(f, ln, std::string(nm) + ": expected " + std::to_string(n) +
                                        " arg(s), got " + std::to_string(a.size()));
     }
     static void nv(const char* nm, const Value& v, int ln, const std::string& f) {
-        if (!v.is_vec()) err(f, ln, std::string(nm) + " expects numeric");
+        if (!v.is_vec()) err(f, ln, std::string(nm) + ": expected numeric, got " + value_kind_name(v));
     }
     static void ns(const char* nm, const Value& v, int ln, const std::string& f) {
-        if (!v.is_str()) err(f, ln, std::string(nm) + " expects string");
+        if (!v.is_str()) err(f, ln, std::string(nm) + ": expected string, got " + value_kind_name(v));
     }
     static void nf(const char* nm, const Value& v, int ln, const std::string& f) {
         if (!v.is_closure() && !v.is_native())
-            err(f, ln, std::string(nm) + " expects function");
+            err(f, ln, std::string(nm) + ": expected function, got " + value_kind_name(v));
     }
     static void nd(const char* nm, const Value& v, int ln, const std::string& f) {
-        if (!v.is_dict()) err(f, ln, std::string(nm) + " expects dict");
+        if (!v.is_dict()) err(f, ln, std::string(nm) + ": expected dict, got " + value_kind_name(v));
     }
 
     void reg(const char* name, NativeFn fn) {
@@ -1423,6 +1427,13 @@ struct Interpreter {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════
+    //  register_builtins — host-callable native functions exposed to
+    //  the script. Sub-sections below organise them by concern.
+    //  Note: this section is placed before eval() in the source for
+    //  historical reasons; for understanding the language semantics,
+    //  read eval() (further down) first and refer back here on demand.
+    // ════════════════════════════════════════════════════════════════
     void register_builtins() {
         // ── polymorphic: len, reverse ─────────────────────────────────
         reg("len", [](auto& a, int ln, auto& f) -> Value {
@@ -1467,7 +1478,7 @@ struct Interpreter {
                             b.data[(b.n_frames - 1 - i) * b.n_channels + c];
                 return Value(out);
             }
-            err(f, ln, "reverse: unsupported type " + Interpreter::type_label(a[0]));
+            err(f, ln, "reverse: unsupported type " + value_kind_name(a[0]));
         });
 
         reg("slice", [](auto& a, int ln, auto& f) -> Value {
@@ -1524,7 +1535,7 @@ struct Interpreter {
                             b.data[(start + i) * b.n_channels + c];
                 return Value(out);
             }
-            err(f, ln, "slice: unsupported type " + Interpreter::type_label(a[0]));
+            err(f, ln, "slice: unsupported type " + value_kind_name(a[0]));
         });
 
         reg("concat", [](auto& a, int ln, auto& f) -> Value {
@@ -1574,8 +1585,8 @@ struct Interpreter {
                 return Value(out);
             }
             err(f, ln, "concat: cannot concatenate "
-                     + Interpreter::type_label(a[0]) + " and "
-                     + Interpreter::type_label(a[1]));
+                     + value_kind_name(a[0]) + " and "
+                     + value_kind_name(a[1]));
         });
 
         // ── vec / buffer: reductions ──────────────────────────────────
@@ -1595,7 +1606,7 @@ struct Interpreter {
         reg("sum",  [reduce_data](auto& a, int ln, auto& f) -> Value {
             ck("sum", a, 1, ln, f);
             if (!a[0].is_vec() && !a[0].is_buffer())
-                err(f, ln, "sum: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+                err(f, ln, "sum: expected vec or buffer, got " + value_kind_name(a[0]));
             return Value(reduce_data(a[0], "sum", 0.0,
                 [](double r, double x, size_t) { return r + x; }));
         });
@@ -1608,7 +1619,7 @@ struct Interpreter {
                 double s = 0; for (double x : b.data) s += x;
                 return Value(s / (double)b.data.size());
             }
-            err(f, ln, "mean: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+            err(f, ln, "mean: expected vec or buffer, got " + value_kind_name(a[0]));
         });
         reg("min",  [](auto& a, int ln, auto& f) -> Value {
             ck("min", a, 1, ln, f);
@@ -1619,7 +1630,7 @@ struct Interpreter {
                 double m = b.data[0]; for (double x : b.data) if (x < m) m = x;
                 return Value(m);
             }
-            err(f, ln, "min: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+            err(f, ln, "min: expected vec or buffer, got " + value_kind_name(a[0]));
         });
         reg("max",  [](auto& a, int ln, auto& f) -> Value {
             ck("max", a, 1, ln, f);
@@ -1630,7 +1641,7 @@ struct Interpreter {
                 double m = b.data[0]; for (double x : b.data) if (x > m) m = x;
                 return Value(m);
             }
-            err(f, ln, "max: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+            err(f, ln, "max: expected vec or buffer, got " + value_kind_name(a[0]));
         });
 
         // ── vec: element-wise math ────────────────────────────────────
@@ -1732,13 +1743,13 @@ struct Interpreter {
         // push: mutates the list in place and returns it (reference semantics).
         reg("push", [](auto& a, int ln, auto& f) -> Value {
             ck("push", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "push expects list");
+            if (!a[0].is_list()) err(f, ln, "push: expected list, got " + value_kind_name(a[0]));
             a[0].as_list_mut().push_back(a[1]);
             return a[0];
         });
         reg("pop", [](auto& a, int ln, auto& f) -> Value {
             ck("pop", a, 1, ln, f);
-            if (!a[0].is_list()) err(f, ln, "pop expects list");
+            if (!a[0].is_list()) err(f, ln, "pop: expected list, got " + value_kind_name(a[0]));
             auto& l = a[0].as_list_mut();
             if (l.empty()) err(f, ln, "pop: empty list");
             Value v = std::move(l.back());
@@ -1747,7 +1758,7 @@ struct Interpreter {
         });
         reg("insert", [](auto& a, int ln, auto& f) -> Value {
             ck("insert", a, 3, ln, f);
-            if (!a[0].is_list()) err(f, ln, "insert expects list");
+            if (!a[0].is_list()) err(f, ln, "insert: expected list, got " + value_kind_name(a[0]));
             nv("insert", a[1], ln, f);
             auto& l = a[0].as_list_mut();
             int i = (int)a[1].scalar();
@@ -1830,13 +1841,13 @@ struct Interpreter {
         });
         reg("has", [](auto& a, int ln, auto& f) -> Value {
             ck("has", a, 2, ln, f);
-            if (!a[0].is_dict()) err(f, ln, "has expects dict");
+            if (!a[0].is_dict()) err(f, ln, "has: expected dict, got " + value_kind_name(a[0]));
             ns("has", a[1], ln, f);
             return Value(a[0].as_dict().count(a[1].as_str()) ? 1.0 : 0.0);
         });
         reg("get", [](auto& a, int ln, auto& f) -> Value {
             if (a.size() != 2 && a.size() != 3) err(f, ln, "get expects 2 or 3 args");
-            if (!a[0].is_dict()) err(f, ln, "get expects dict");
+            if (!a[0].is_dict()) err(f, ln, "get: expected dict, got " + value_kind_name(a[0]));
             ns("get", a[1], ln, f);
             auto& d = a[0].as_dict();
             auto it = d.find(a[1].as_str());
@@ -1847,7 +1858,7 @@ struct Interpreter {
         // ── higher-order: map, filter, reduce, each, apply ────────────
         reg("map", [this](auto& a, int ln, auto& f) -> Value {
             ck("map", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "map expects list");
+            if (!a[0].is_list()) err(f, ln, "map: expected list, got " + value_kind_name(a[0]));
             nf("map", a[1], ln, f);
             List out;
             for (auto& x : a[0].as_list()) out.push_back(call_value(a[1], {x}, ln, f));
@@ -1855,7 +1866,7 @@ struct Interpreter {
         });
         reg("filter", [this](auto& a, int ln, auto& f) -> Value {
             ck("filter", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "filter expects list");
+            if (!a[0].is_list()) err(f, ln, "filter: expected list, got " + value_kind_name(a[0]));
             nf("filter", a[1], ln, f);
             List out;
             for (auto& x : a[0].as_list())
@@ -1864,7 +1875,7 @@ struct Interpreter {
         });
         reg("reduce", [this](auto& a, int ln, auto& f) -> Value {
             ck("reduce", a, 3, ln, f);
-            if (!a[0].is_list()) err(f, ln, "reduce expects list");
+            if (!a[0].is_list()) err(f, ln, "reduce: expected list, got " + value_kind_name(a[0]));
             nf("reduce", a[1], ln, f);
             Value acc = a[2];
             for (auto& x : a[0].as_list()) acc = call_value(a[1], {acc, x}, ln, f);
@@ -1872,7 +1883,7 @@ struct Interpreter {
         });
         reg("each", [this](auto& a, int ln, auto& f) -> Value {
             ck("each", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "each expects list");
+            if (!a[0].is_list()) err(f, ln, "each: expected list, got " + value_kind_name(a[0]));
             nf("each", a[1], ln, f);
             for (auto& x : a[0].as_list()) call_value(a[1], {x}, ln, f);
             return Value(nullptr);
@@ -1920,7 +1931,7 @@ struct Interpreter {
         });
         reg("join", [](auto& a, int ln, auto& f) -> Value {
             ck("join", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "join expects list");
+            if (!a[0].is_list()) err(f, ln, "join: expected list, got " + value_kind_name(a[0]));
             ns("join", a[1], ln, f);
             std::string r;
             auto& l = a[0].as_list();
@@ -2192,19 +2203,19 @@ struct Interpreter {
         reg_doc("frames", "frames(buffer) — number of frames.",
                 [](auto& a, int ln, auto& f) -> Value {
             ck("frames", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "frames expects buffer");
+            if (!a[0].is_buffer()) err(f, ln, "frames: expected buffer, got " + value_kind_name(a[0]));
             return Value((double)a[0].as_buffer().n_frames);
         });
         reg_doc("channels", "channels(buffer) — number of channels.",
                 [](auto& a, int ln, auto& f) -> Value {
             ck("channels", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "channels expects buffer");
+            if (!a[0].is_buffer()) err(f, ln, "channels: expected buffer, got " + value_kind_name(a[0]));
             return Value((double)a[0].as_buffer().n_channels);
         });
         reg_doc("sample_rate", "sample_rate(buffer) — sample rate in Hz.",
                 [](auto& a, int ln, auto& f) -> Value {
             ck("sample_rate", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "sample_rate expects buffer");
+            if (!a[0].is_buffer()) err(f, ln, "sample_rate: expected buffer, got " + value_kind_name(a[0]));
             return Value(a[0].as_buffer().sample_rate);
         });
         // Convert a mono buffer to a Vec (for arithmetic / DSP in flux).
@@ -2212,7 +2223,7 @@ struct Interpreter {
                 "buffer_to_vec(buffer) — return Vec of all samples (interleaved if multi-channel).",
                 [](auto& a, int ln, auto& f) -> Value {
             ck("buffer_to_vec", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "buffer_to_vec expects buffer");
+            if (!a[0].is_buffer()) err(f, ln, "buffer_to_vec: expected buffer, got " + value_kind_name(a[0]));
             auto& b = a[0].as_buffer();
             Vec v(b.data.size());
             for (size_t i = 0; i < b.data.size(); ++i) v[i] = b.data[i];
@@ -2223,7 +2234,7 @@ struct Interpreter {
                 "vec_to_buffer(vec [, sample_rate]) — build a mono buffer from a Vec.",
                 [](auto& a, int ln, auto& f) -> Value {
             if (a.size() < 1 || a.size() > 2) err(f, ln, "vec_to_buffer expects 1 or 2 args");
-            if (!a[0].is_vec()) err(f, ln, "vec_to_buffer expects vec");
+            if (!a[0].is_vec()) err(f, ln, "vec_to_buffer: expected vec, got " + value_kind_name(a[0]));
             auto b = std::make_shared<Buffer>();
             auto& v = a[0].as_vec();
             b->n_frames = v.size();
@@ -2242,7 +2253,7 @@ struct Interpreter {
                 "opaque_type(opaque) — return the type tag string of an opaque value.",
                 [](auto& a, int ln, auto& f) -> Value {
             ck("opaque_type", a, 1, ln, f);
-            if (!a[0].is_opaque()) err(f, ln, "opaque_type expects opaque");
+            if (!a[0].is_opaque()) err(f, ln, "opaque_type: expected opaque, got " + value_kind_name(a[0]));
             return Value(Str(a[0].as_opaque().type_tag));
         });
 
@@ -2300,21 +2311,6 @@ struct Interpreter {
     }
 
     // ── broadcast binary op ───────────────────────────────────────────
-    // Human-readable type name for error diagnostics. Mirrors value_kind_name
-    // but is also defined for the binop path which may run before that gets
-    // called. Kept inline to avoid forward-declaration noise.
-    static std::string type_label(const Value& v) {
-        if (v.is_nil())     return "nil";
-        if (v.is_vec())     return v.as_vec().size() == 1 ? "scalar" : "vec";
-        if (v.is_str())     return "string";
-        if (v.is_list())    return "list";
-        if (v.is_dict())    return "dict";
-        if (v.is_buffer())  return "buffer";
-        if (v.is_opaque())  return "opaque:" + v.as_opaque().type_tag;
-        if (v.is_closure() || v.is_native()) return "func";
-        return "?";
-    }
-
     // Apply a numeric binary op to two flat arrays of doubles into r (size n).
     // Caller guarantees va.size() == vb.size() == n.
     static void apply_double_op(const double* a, const double* b, double* r,
@@ -2348,7 +2344,7 @@ struct Interpreter {
         }
         if (!a_num || !b_num) {
             err(f, ln, "operator '" + op + "': cannot apply to "
-                     + type_label(a) + " and " + type_label(b));
+                     + value_kind_name(a) + " and " + value_kind_name(b));
         }
 
         // ── buffer arithmetic ────────────────────────────────────────
@@ -2382,7 +2378,7 @@ struct Interpreter {
             const Value& sca_v = a.is_buffer() ? b : a;
             if (!sca_v.is_vec() || sca_v.as_vec().size() != 1)
                 err(f, ln, "operator '" + op + "': buffer can only combine with scalar or same-shape buffer (got "
-                         + type_label(sca_v) + ")");
+                         + value_kind_name(sca_v) + ")");
             auto& src = buf_v.as_buffer();
             double k = sca_v.scalar();
             auto out = std::make_shared<Buffer>();
@@ -2598,7 +2594,7 @@ struct Interpreter {
                     for (size_t i = 0; i < b.data.size(); ++i) out->data[i] = -b.data[i];
                     return Value(out);
                 }
-                err(f, ln, "unary '-': cannot negate " + type_label(v));
+                err(f, ln, "unary '-': cannot negate " + value_kind_name(v));
             }
             if (e->op == "not") return Value(eval(e->left, env).truthy() ? 0.0 : 1.0);
             err(f, ln, "unknown unary '" + e->op + "'");
@@ -3046,6 +3042,7 @@ struct Interpreter {
         }
         return lr;
     }
+    // ── public entry points ───────────────────────────────────────────
     void run_file(const std::string& fname, EnvPtr env) {
         std::ifstream f(fname);
         if (!f) throw std::runtime_error("cannot open " + fname);
