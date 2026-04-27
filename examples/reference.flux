@@ -48,313 +48,291 @@ if (1) {
 # All numbers are 64-bit floats. There is no separate integer type.
 # Internally a "scalar" is a Vec of length 1 — that's why type(42) is
 # "scalar" while type([1,2]) is "vec". They participate in the same
-# arithmetic; the distinction is shown only by `type()`.
+# arithmetic by broadcasting (see § 8).
 
 print ""
 print "══ § 3. Numbers ══════════════════════════════════"
-print "  42        =>" 42
-print "  3.14      =>" 3.14
-print "  -7        =>" (-7)
-print "  1e3       =>" 1e3
-print "  1.5e-2    =>" 1.5e-2
-print "  type(42)  =>" type(42)
-print "  type([1,2]) =>" type([1, 2])
-
-# Arithmetic
-print "  2 + 3     =>" 2 + 3
-print "  10 / 4    =>" 10 / 4
-print "  10 % 3    =>" 10 % 3
-print "  2 + 3 * 4 =>" 2 + 3 * 4
-print "  (2+3)*4   =>" (2 + 3) * 4
-
-# Constants
-print "  pi        =>" pi
-print "  e         =>" e
-print "  inf       =>" inf
+print "  basic   =>" 1 + 2 * 3
+print "  hex-ish =>" 1.5e3 + 0.5
+print "  trig    =>" sin(pi / 2)
+print "  pow     =>" pow(2, 10)
+print "  modulo  =>" 7 % 3
+print "  inf?    =>" 1 / 0
 
 
 # ──────────────────────────────────────────────────────────────────────
 # § 4. Strings
 # ──────────────────────────────────────────────────────────────────────
-# Strings are byte sequences. Iteration and indexing are byte-based, so
-# UTF-8 multibyte characters split if iterated as `for c in str`. The
-# string operations are: upper, lower, trim, substr, find, replace,
-# split, join, concat, reverse, slice, len, char, asc, format.
-#
-# Escape sequences in literals: \n \t \r \0 \\ \" (any other \x is the
-# raw character). Strings can also be indexed with [i] (negative indexes
-# count from the end).
+# Strings are byte sequences with no built-in Unicode awareness. Indexing
+# is byte-based; `for c in s` walks one byte at a time. Standard escape
+# sequences: \n \t \r \0 \\ \". There is no string `+` operator — use
+# concat() or format() instead (see § 21 format/out).
 
 print ""
 print "══ § 4. Strings ══════════════════════════════════"
-var s = "Hello, World"
-print "  s              =>" s
-print "  len(s)         =>" len(s)
-print "  s[0]           =>" s[0]
-print "  s[-1]          =>" s[-1]
-print "  upper(s)       =>" upper(s)
-print "  lower(s)       =>" lower(s)
-print "  trim(\"  hi  \") =>" trim("  hi  ")
-print "  substr(s,7,5)  =>" substr(s, 7, 5)
-print "  find(s,\"World\")=>" find(s, "World")
-print "  find(s,\"xyz\")  =>" find(s, "xyz")
-print "  replace(s,\"l\",\"L\") =>" replace(s, "l", "L")
-print "  split(\"a,b,c\",\",\") =>" split("a,b,c", ",")
-print "  join(list(\"a\",\"b\"),\"-\") =>" join(list("a", "b"), "-")
-print "  concat(\"foo\",\"bar\")=>" concat("foo", "bar")
-print "  reverse(\"abc\") =>" reverse("abc")
-print "  slice(s,7,12)  =>" slice(s, 7, 12)
-print "  char(65)       =>" char(65)
-print "  asc(\"A\")       =>" asc("A")
-
-# Escapes
-print "  \"\\n=newline\" => [" "newline-after\nhere" "]"
-print "  \"\\t=tab\"     =>" "before\tafter"
+print "  upper      =>" upper("hello world")
+print "  trim       =>" trim("   spaced   ")
+print "  substr     =>" substr("hello world", 6, 5)
+print "  find       =>" find("greetings", "ting")
+print "  replace    =>" replace("a-b-c", "-", "_")
+print "  split/join =>" join(split("a,b,c", ","), " | ")
+print "  concat     =>" concat("foo", "bar")
+print "  asc/char   =>" asc("A") char(65)
+print "  index neg  =>" "hello"[-1]
 
 
 # ──────────────────────────────────────────────────────────────────────
 # § 5. nil, booleans, and truthiness
 # ──────────────────────────────────────────────────────────────────────
-# There is no dedicated boolean type. `true` and `false` are bound to 1
-# and 0. Truthiness:
-#   - nil          → false
-#   - 0            → false (any non-zero scalar is truthy)
-#   - empty string → false
-#   - empty list   → false
-#   - empty dict   → false
-#   - empty vec    → false
-#   - vec with any zero element → false (all-truthy semantics)
-#   - everything else → true
-#
-# The all-truthy rule for vec means `if (v == w) { ... }` correctly
-# reads as "all elements equal", since v == w produces an element-wise
-# vec of 0s/1s that is truthy iff every element matched.
+# nil is its own type. true/false are scalar 1/0. Truthiness rules:
+#   nil           — false
+#   "" / [] / ()  — false
+#   {}            — false
+#   0             — false
+#   any other vec — true iff every element is non-zero (matches MATLAB)
+# This makes `if (v == w) { ... }` mean "all elements equal".
 
 print ""
 print "══ § 5. nil & truthiness ═════════════════════════"
-print "  nil           =>" nil
-print "  true, false   =>" true false
-print "  not 0         =>" (not 0)
-print "  not nil       =>" (not nil)
-print "  not \"\"        =>" (not "")
-print "  not list()    =>" (not list())
-print "  not {}        =>" (not {})
-print "  not 5         =>" (not 5)
-print "  not [1,1,1]   =>" (not [1, 1, 1])      # all non-zero → truthy
-print "  not [1,0,1]   =>" (not [1, 0, 1])      # has a zero → falsy
-# This is what makes vec equality usable in if/while:
-if ([1, 2, 3] == [1, 2, 3]) { print "  if (v==w) entered branch" }
+if (nil) { print "  nil truthy?" } else { print "  nil is falsy" }
+if (0)   { print "  0 truthy?"   } else { print "  0 is falsy"   }
+if ([])  { print "  [] truthy?"  } else { print "  [] is falsy"  }
+if ([1, 2, 3]) { print "  [1,2,3] is truthy" }
+if ([1, 0, 3]) { print "  [1,0,3] truthy?" } else { print "  [1,0,3] is falsy (a zero element)" }
+print "  type(nil) =>" type(nil)
 
 
 # ──────────────────────────────────────────────────────────────────────
 # § 6. Comparison and equality
 # ──────────────────────────────────────────────────────────────────────
-# == and != are STRUCTURAL — they recurse into lists and dicts.
-# Across different types the result is always false (so 1 != "1").
-# < > <= >= require both sides to be numeric.
-# For Vec-vs-Vec, == produces an element-wise Vec of 0s/1s (NumPy-style);
-# for everything else it produces a scalar 0 or 1.
+# == / != are STRUCTURAL on lists, dicts, strings, and nil. On vec they
+# are element-wise (NumPy-style). Cross-type compares are always !=.
+# < > <= >= are numeric only.
 
 print ""
 print "══ § 6. Comparison ═══════════════════════════════"
-print "  5 == 5             =>" (5 == 5)
-print "  1 == \"1\"           =>" (1 == "1")        # false: cross-type
-print "  nil == nil         =>" (nil == nil)
-print "  list(1,2) == list(1,2) =>" (list(1,2) == list(1,2))
-print "  {a:1} == {a:1}     =>" ({a:1} == {a:1})
-print "  [1,2,3] == [1,2,4] =>" ([1, 2, 3] == [1, 2, 4])  # element-wise
-print "  3 < 5              =>" (3 < 5)
+print "  list ==  =>" (list(1,2,3) == list(1,2,3))
+print "  dict ==  =>" ({a:1, b:2} == {b:2, a:1})            # order-independent
+print "  cross    =>" (1 == "1")                             # 0
+print "  vec elem =>" ([1,2,3] == [1,2,4])                   # [1, 1, 0]
+# A vec equality used in `if` means "all elements equal" (truthiness rule):
+if ([1,2,3] == [1,2,3]) { print "  all-eq?  => yes" }
 
 
 # ──────────────────────────────────────────────────────────────────────
 # § 7. Logical operators
 # ──────────────────────────────────────────────────────────────────────
-# and / or / not. `and` and `or` short-circuit: the right operand is
-# only evaluated if the result still depends on it.
+# `and` `or` are short-circuit. `not` is unary. `not` binds tighter than
+# `and`/`or`; precedence is the C-family one.
 
 print ""
 print "══ § 7. Logical operators ════════════════════════"
-print "  1 and 1   =>" (1 and 1)
-print "  1 and 0   =>" (1 and 0)
-print "  0 or 1    =>" (0 or 1)
-print "  not 1     =>" (not 1)
-# Short-circuiting: undef_xyz never evaluated because `0 and ...` is 0.
-print "  short-circuit =>" (0 and undef_xyz)
+print "  not 1 and 0 =>" (not 1 and 0)
+print "  1 or 0 and 0 =>" (1 or 0 and 0)
+# Short-circuit: side-effecting RHS doesn't fire when LHS settles things
+var fired = 0
+func tag() { fired = 1  return 1 }
+var _ = (1 or tag())
+print "  short-circuit fired? =>" fired
 
 
 # ──────────────────────────────────────────────────────────────────────
 # § 8. Vec — numeric arrays with broadcasting
 # ──────────────────────────────────────────────────────────────────────
-# A Vec is a contiguous block of doubles, written with [...]. All the
-# arithmetic and comparison operators broadcast scalar↔vec and operate
-# element-wise on vec↔vec. Vecs assign by VALUE (copying); index
-# assignment v[i] = x mutates in place.
-#
-# Constructors: range, zeros, ones, vec(list), rand
-# Reductions:   sum, mean, min, max
-# Math:         sqrt, abs, sin, cos, tan, exp, log, asin, acos, atan,
-#               floor, ceil, round, pow, sort
-# Generic:      len, reverse, slice, concat (must be vec+vec)
+# Vecs are flat arrays of doubles, value-typed (assignment copies). All
+# arithmetic, comparison, and the standard math functions broadcast:
+# scalar + vec, vec + vec (same size), and elementwise comparison.
 
 print ""
 print "══ § 8. Vec ══════════════════════════════════════"
 var v = [1, 2, 3, 4]
-print "  v               =>" v
-print "  len(v)          =>" len(v)
-print "  v[0], v[-1]     =>" v[0] v[-1]
-print "  v + 10          =>" (v + 10)              # scalar broadcast
-print "  v * v           =>" (v * v)               # element-wise
-print "  sum(v)          =>" sum(v)
-print "  mean(v)         =>" mean(v)
-print "  min(v), max(v)  =>" min(v) max(v)
-print "  range(5)        =>" range(5)
-print "  range(0,10,2)   =>" range(0, 10, 2)
-print "  zeros(3)        =>" zeros(3)
-print "  ones(3)         =>" ones(3)
-print "  sqrt([1,4,9])   =>" sqrt([1, 4, 9])
-print "  pow([1,2,3], 2) =>" pow([1, 2, 3], 2)
-print "  sort([3,1,2])   =>" sort([3, 1, 2])
-print "  reverse([1,2,3])=>" reverse([1, 2, 3])
-print "  sin([0, pi/2])  =>" sin([0, pi / 2])
-
-# Vec value semantics: assignment copies.
-var v1 = [10, 20, 30]
-var v2 = v1
-v2[0] = 99
-print "  v1, v2 (vec is value-typed) =>" v1 v2
+print "  v + 10      =>" (v + 10)
+print "  v * v       =>" (v * v)
+print "  sum(v)      =>" sum(v)
+print "  range       =>" range(0, 10, 2)
+print "  zeros/ones  =>" zeros(3) ones(3)
+print "  sqrt        =>" sqrt([1, 4, 9, 16])
+print "  pow         =>" pow([1, 2, 3], 2)
+print "  sort        =>" sort([3, 1, 2])
+print "  slice       =>" slice([10,20,30,40,50], 1, 4)
+print "  reverse     =>" reverse([1, 2, 3])
+print "  concat      =>" concat([1,2], [3,4])
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 9. Lists — heterogeneous, reference-shared
+# § 9. Buffers — first-class audio
 # ──────────────────────────────────────────────────────────────────────
-# Lists hold any mix of types: numbers, strings, vecs, dicts, other
-# lists, functions. Built with the `list(...)` function. Lists assign
-# by REFERENCE — `b = a` shares the underlying storage; use copy() to
-# detach. push/pop/insert/remove all mutate in place.
+# A Buffer holds an interleaved array of doubles plus n_frames,
+# n_channels, and sample_rate. It's reference-shared (like list/dict).
+# Buffers exist BECAUSE vecs aren't enough for audio:
+#
+#   - vec is a flat sequence with no shape information; a stereo signal
+#     in a vec needs an out-of-band convention (planar? interleaved?)
+#   - vec has no sample-rate metadata; resampling, scheduling, and
+#     format checks would need parallel side-channels
+#   - vec is value-typed (assign copies); for multi-MB audio that's
+#     pure waste when the host C++ already owns the bytes
+#
+# Buffers index two ways:
+#   buf[i]      — frame i: scalar (mono) or vec of channels
+#   buf[i, c]   — sample at frame i, channel c (always scalar)
+# Iteration with `for fr in buf` yields per-frame values.
+# Buffers participate in arithmetic the way vec does:
+#   buf * 0.5, buf + buf, -buf — all return new buffers
+# slice/reverse/concat work by frame.
 
 print ""
-print "══ § 9. Lists ════════════════════════════════════"
+print "══ § 9. Buffers ══════════════════════════════════"
+var buf = buffer(8, 2, 48000)        # 8 frames, stereo, 48 kHz
+print "  shape          =>" frames(buf) "x" channels(buf) "@" sample_rate(buf) "Hz"
+print "  buf            =>" buf
+
+# Element write
+buf[0, 0] = 0.5  buf[0, 1] = -0.5
+buf[1, 0] = 0.7  buf[1, 1] = -0.7
+print "  buf[0]         =>" buf[0]            # vec [0.5, -0.5]
+print "  buf[1, 0]      =>" buf[1, 0]
+
+# Whole-frame assignment via vec
+buf[2] = [0.1, 0.9]
+print "  buf[2] = [..]  =>" buf[2]
+
+# Arithmetic — buffer-as-numeric-type
+var gained = buf * 0.5
+print "  gain shape     =>" frames(gained) "x" channels(gained)
+print "  gained[0]      =>" gained[0]
+
+# Reductions over flat samples
+print "  sum / max / mean (of buf) =>" sum(buf) max(buf) mean(buf)
+
+# Slice (frame-level), reverse, concat
+var mono = vec_to_buffer([10, 20, 30, 40, 50, 60])
+print "  slice 1..4     =>" buffer_to_vec(slice(mono, 1, 4))
+print "  reverse        =>" buffer_to_vec(reverse(mono))
+print "  concat         =>" buffer_to_vec(concat(slice(mono, 0, 2), slice(mono, 4, 6)))
+
+# Iteration: per-frame values
+var energy = 0
+for (var fr in buf) { energy = energy + sum(fr * fr) }
+print "  energy         =>" energy
+
+# Conversions to/from vec
+var v2 = vec_to_buffer([1, 2, 3, 4], 22050)
+print "  vec→buffer→vec =>" buffer_to_vec(v2) "@" sample_rate(v2)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 10. Lists — heterogeneous, reference-shared
+# ──────────────────────────────────────────────────────────────────────
+# Lists hold any mix of values. Built with list(...). They are
+# reference-shared (assigning a list aliases it); use copy() to detach.
+
+print ""
+print "══ § 10. Lists ═══════════════════════════════════"
 var l = list(1, "two", [3, 4], {x: 5})
-print "  l           =>" l
-print "  len(l)      =>" len(l)
-print "  l[1]        =>" l[1]
-print "  l[-1]       =>" l[-1]
-
-# Mutation
-push(l, "appended")
-print "  after push  =>" l
-var popped = pop(l)
-print "  pop returns =>" popped
+print "  l[2]       =>" l[2]
+push(l, 99)
+print "  after push =>" l
+pop(l)
 insert(l, 0, "head")
-print "  after insert=>" l
-var rem = remove(l, 1)
-print "  remove[1]   =>" rem "  list now:" l
-l[0] = "FIRST"          # index assignment
-print "  after l[0]= =>" l
-
-# Reference vs copy semantics
-var la = list(1, 2, 3)
-var lb = la                 # shares
-push(lb, 4)
-var lc = copy(la)           # detaches
-push(lc, 99)
-print "  la,lb share =>" la lb
-print "  lc is copy  =>" lc
-
-# Whole-list ops
-print "  reverse     =>" reverse(list(1, 2, 3))
-print "  slice(1,3)  =>" slice(list("a","b","c","d","e"), 1, 3)
-print "  concat      =>" concat(list(1, 2), list(3, 4))
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 10. Dicts — string-keyed maps, reference-shared
-# ──────────────────────────────────────────────────────────────────────
-# Dicts use {key: value, ...} syntax. Keys are strings (bare identifiers
-# in literals are auto-stringified). Member access uses `.` for
-# identifier keys, [...] for arbitrary string keys. Missing keys read
-# back as nil. Dicts assign by REFERENCE; copy() to detach. Iteration
-# order via for-in is sorted by key (deterministic).
-
-print ""
-print "══ § 10. Dicts ═══════════════════════════════════"
-var d = {name: "Ada", age: 7, tags: list("a", "b")}
-print "  d             =>" d
-print "  d.name        =>" d.name
-print "  d[\"age\"]      =>" d["age"]
-print "  d.missing     =>" d.missing                 # nil
-print "  has(d,\"name\") =>" has(d, "name")
-print "  has(d,\"x\")    =>" has(d, "x")
-print "  get(d,\"x\",-1) =>" get(d, "x", -1)
-print "  keys(d)       =>" keys(d)
-print "  values(d)     =>" values(d)
-print "  len(d)        =>" len(d)
-
-# Mutation
-d.age = 8
-d["new key"] = 99
-print "  after writes  =>" d
-var removed = remove(d, "tags")
-print "  remove tags   =>" removed "  d:" d
-
-# Nested dicts: deep read + deep write
-var cfg = {db: {host: "localhost", port: 5432}}
-cfg.db.port = 9999
-print "  cfg.db.port   =>" cfg.db.port
+print "  after ins  =>" l
+print "  slice      =>" slice(l, 1, 3)
+print "  concat     =>" concat(list(1, 2), list(3, 4))
 
 # Reference vs copy
-var d1 = {x: 1}
-var d2 = d1                 # shares
-d2.x = 99
-var d3 = copy(d1)
-d3.x = 0
-print "  d1,d2 share   =>" d1 d2
-print "  d3 is copy    =>" d3
+var la = list(1, 2, 3)
+var lb = la                # alias
+push(lb, 99)
+print "  shared?    =>" la
 
-# Equality is structural (and order-independent)
-print "  {a:1,b:2} == {b:2,a:1} =>" ({a: 1, b: 2} == {b: 2, a: 1})
-
-# Building a dict from pairs
-var built = dict(list(list("a", 1), list("b", 2)))
-print "  dict(pairs)   =>" built
+var lc = copy(la)
+push(lc, 0)
+print "  detached?  =>" la lc
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 11. Indexing and member access summary
+# § 11. Dicts — string-keyed maps, reference-shared
 # ──────────────────────────────────────────────────────────────────────
-# v[i]    — vec, list, string: numeric index (negatives wrap)
-# d[k]    — dict: string key, returns nil on miss
-# d.k     — dict only: same as d["k"]
-# Assignment uses the same forms: x[i] = v, x.k = v.
-# For nested writes (a.b.c = v) the intermediate path must already
-# exist; only the terminal level can be created by assignment.
+# Literal {key: value, ...}. Bare-identifier keys are auto-stringified;
+# quoted strings allow arbitrary keys. Member access uses .name for
+# identifier keys, ["any string"] for the rest. Iteration yields keys in
+# sorted order. Reference-shared like list and buffer.
 
 print ""
-print "══ § 11. Indexing & member access ════════════════"
-print "  vec       [1,2,3][1]      =>" ([1, 2, 3][1])
-print "  list      list(\"a\",\"b\")[0]=>" list("a", "b")[0]
-print "  string    \"hello\"[1]      =>" "hello"[1]
-print "  dict      {a:1,b:2}[\"a\"]  =>" {a: 1, b: 2}["a"]
-print "  member    {a:1,b:2}.b     =>" {a: 1, b: 2}.b
+print "══ § 11. Dicts ═══════════════════════════════════"
+var d = {name: "Ada", age: 7, "with space": 42}
+print "  d.name      =>" d.name
+print "  d[\"with space\"] =>" d["with space"]
+d.age = 8
+d["new"] = 99
+print "  d           =>" d
+print "  has(d,\"new\") =>" has(d, "new")
+print "  get default =>" get(d, "missing", "fallback")
+print "  keys        =>" keys(d)
+print "  len         =>" len(d)
+
+# Concat dicts (right wins)
+print "  merge       =>" concat({a: 1, b: 2}, {b: 99, c: 3})
+
+# Build from pairs
+print "  from pairs  =>" dict(list(list("k1", 1), list("k2", 2)))
+
+# Iteration is sorted-keys deterministic
+for (var k in {z: 1, a: 2, m: 3}) { out(concat("  iter ", concat(k, " "))) }
+out("\n")
+
+# Dicts compare structurally, regardless of insertion order
+print "  dict ==     =>" ({x: 1, y: 2} == {y: 2, x: 1})
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 12. Control flow: if / while / for / for-in
+# § 12. Opaque — host-side handles
 # ──────────────────────────────────────────────────────────────────────
-# if (...) { ... } else if (...) { ... } else { ... }
-# while (cond) { ... }
-# for (init; cond; update) { ... }      — C-style
-# for (var x in iterable) { ... }       — list, vec, string, dict (keys)
-# break and continue are loop-only; they error if used elsewhere.
+# Opaque values wrap a C++ shared_ptr<void> and a type tag. They are
+# created by the host (FFT plans, file/stream handles, ML models,
+# audio-device handles) and are intentionally inert from script: you
+# can pass them around, store them in dicts, ask their tag, and hand
+# them back to natives. You can't introspect their contents.
+#
+# (No Flux-side constructor — host C++ uses
+#    flux::Value(flux::Opaque{"my_tag", std::make_shared<MyData>(...)})
+# inside a register_builtin lambda.)
 
 print ""
-print "══ § 12. Control flow ════════════════════════════"
+print "══ § 12. Opaque (host-side) ══════════════════════"
+print "  type(x) returns \"opaque\"; opaque_type(x) returns the host tag."
+print "  Use a typed signature like \"opaque:fft_plan, buffer\" with"
+print "  register_builtin_typed to dispatch on the tag automatically."
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 13. Indexing and member access summary
+# ──────────────────────────────────────────────────────────────────────
+
+print ""
+print "══ § 13. Indexing & member access ════════════════"
+print "  vec[i]        =>" ([10, 20, 30][1])
+print "  vec[-1]       =>" ([10, 20, 30][-1])
+print "  list[i]       =>" (list("a","b","c")[1])
+print "  string[i]     =>" ("hello"[1])
+print "  dict.key      =>" ({a:1, b:2}.b)
+print "  dict[\"k\"]     =>" ({a:1, b:2}["a"])
+print "  buf[i]        =>" (buffer(3)[0])              # mono → scalar
+print "  buf[i, c]     =>" ((buffer(3, 2))[0, 1])       # multi → scalar
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 14. Control flow: if / while / for / for-in
+# ──────────────────────────────────────────────────────────────────────
+
+print ""
+print "══ § 14. Control flow ════════════════════════════"
 
 # if / else if / else
-var n = 7
-if (n < 0)        { print "  negative" }
-else if (n == 0)  { print "  zero" }
-else              { print "  positive:" n }
+var grade = 86
+if      (grade >= 90) { print "  A" }
+else if (grade >= 80) { print "  B" }
+else                  { print "  ≤ C" }
 
 # while
 var i = 0
@@ -367,151 +345,120 @@ var prod = 1
 for (var k = 1; k <= 5; k = k + 1) { prod = prod * k }
 print "  5! via c-for   =>" prod
 
-# for-in over list, vec, string, dict
-var col = list()
-for (var x in list("a", "b", "c")) { push(col, x) }
-print "  for-in list    =>" col
-
-var s2 = 0
-for (var v in [10, 20, 30]) { s2 = s2 + v }
-print "  for-in vec     =>" s2
-
-var chars = list()
-for (var c in "abc") { push(chars, c) }
-print "  for-in string  =>" chars
-
-var seen_keys = list()
-for (var k in {b: 2, a: 1, c: 3}) { push(seen_keys, k) }
-print "  for-in dict (keys, sorted) =>" seen_keys
+# for-in over each iterable kind
+for (var x in [10, 20, 30]) { out("  vec ") out(x) out("") } out("\n")
+for (var x in list("a","b","c")) { out("  list ") out(x) out("") } out("\n")
+for (var c in "abc") { out("  str ") out(c) out("") } out("\n")
+for (var k in {q: 1, m: 2, a: 3}) { out("  dict-key ") out(k) out("") } out("\n")
+var fb = vec_to_buffer([1, 2, 3])
+for (var fr in fb) { out("  buf ") out(fr) out("") } out("\n")
 
 # break / continue
-var first_even = -1
-for (var k in range(1, 100)) {
-    if (k % 2 == 0) { first_even = k  break }
+var found = nil
+for (var n in range(20)) {
+    if (n == 7) { found = n  break }
 }
-print "  first_even     =>" first_even
+print "  break at n=7  =>" found
 
-var odds = list()
-for (var k in range(10)) {
-    if (k % 2 == 0) { continue }
-    push(odds, k)
+# A closure called from a loop cannot break that loop:
+func tries_to_break() { break }
+try {
+    for (var n in range(3)) { tries_to_break() }
+} catch (e) {
+    print "  closure break =>" e.message
 }
-print "  odds < 10      =>" odds
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 13. Functions
+# § 15. Functions
 # ──────────────────────────────────────────────────────────────────────
-# Statement-form named function:   func name(params) { body }
-# Expression-form (anonymous only): func(params) { body }
-#
-# `return expr` returns; bare `return` returns nil; missing return
-# falls off the end and returns nil. Arity is enforced.
+# Statement-form `func name(args) { ... }` declares; expression-form
+# `func(args) { ... }` is an anonymous lambda. Arity is enforced.
+# `return expr` returns; bare `return` returns nil; falling off the end
+# also returns nil.
 
 print ""
-print "══ § 13. Functions ═══════════════════════════════"
-
+print "══ § 15. Functions ═══════════════════════════════"
 func square(x) { return x * x }
-print "  square(5)     =>" square(5)
+print "  square(7) =>" square(7)
 
-# Anonymous function as a value
-var triple = func(x) { return x * 3 }
-print "  triple(7)     =>" triple(7)
+var f = func(x) { return x + 100 }
+print "  anon       =>" f(5)
 
-# Multi-arg
-func hypot(a, b) { return sqrt([a*a + b*b])[0] }
-print "  hypot(3,4)    =>" hypot(3, 4)
-
-# Bare return = nil
-func nothing() { return }
-print "  nothing()     =>" nothing()
-
-# IIFE — invoke an anonymous function immediately
-print "  IIFE          =>" (func(x) { return x + 1 })(41)
+# Apply takes (fn, list-of-args); map/filter/reduce take (collection, fn).
+print "  apply()    =>" apply(square, list(9))
+print "  map        =>" map(list(1, 2, 3), func(x) { return x * 10 })
+print "  filter     =>" filter(list(1, 2, 3, 4, 5), func(x) { return x > 2 })
+print "  reduce     =>" reduce(list(1, 2, 3, 4), func(a, b) { return a + b }, 0)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 14. Closures
+# § 16. Closures
 # ──────────────────────────────────────────────────────────────────────
-# Functions capture their lexical scope by reference. Mutating a
-# captured variable from inside the closure updates the outer slot.
+# Functions capture lexical scope by reference, including across
+# returns. This makes counters, accumulators, and decorators easy.
 
 print ""
-print "══ § 14. Closures ════════════════════════════════"
-
+print "══ § 16. Closures ════════════════════════════════"
 func make_adder(n) { return func(x) { return x + n } }
 var add3 = make_adder(3)
 var add10 = make_adder(10)
-print "  add3(5), add10(5) =>" add3(5) add10(5)
+print "  add3(5)   =>" add3(5)
+print "  add10(5)  =>" add10(5)
 
-# Mutable closure state — independent counters
+# Counter pattern
 func make_counter() {
     var n = 0
     return func() { n = n + 1  return n }
 }
-var c1 = make_counter()
-var c2 = make_counter()
-print "  c1: " c1() c1() c1()       # 1 2 3
-print "  c2 independent: " c2() c2() # 1 2
+var c = make_counter()
+print "  counter   =>" c() c() c()
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 15. Recursion and tail-call optimization
+# § 17. Recursion and tail-call optimization
 # ──────────────────────────────────────────────────────────────────────
-# A `return f(args...)` in tail position reuses the current call frame:
-# the C++ stack does NOT grow. This applies to any callee, including
-# mutual recursion. The default max_stack of 1000 still bounds non-tail
-# recursion, but tail calls are unbounded.
+# `return f(...)` in tail position reuses the C++ frame, so tail
+# recursion (self or mutual) runs in O(1) C++ stack. Non-tail
+# recursion is bounded by max_stack (default 1000).
 
 print ""
-print "══ § 15. Recursion & TCO ═════════════════════════"
-
-# Naïve (non-tail) recursion is bounded:
-func fact(n) { if (n <= 1) { return 1 } return n * fact(n - 1) }
-print "  fact(10)      =>" fact(10)
-
-# Tail-recursive accumulator — runs in O(1) stack
+print "══ § 17. Recursion & TCO ═════════════════════════"
 func sum_to(n, acc) {
     if (n == 0) { return acc }
-    return sum_to(n - 1, acc + n)            # tail call
+    return sum_to(n - 1, acc + n)        # tail call
 }
-print "  sum_to(50000) =>" sum_to(50000, 0)
+print "  sum to 1..1000 =>" sum_to(1000, 0)
 
-# Mutual TCO
+# Mutual tail recursion
 func is_even(k) { if (k == 0) { return 1 } return is_odd(k - 1) }
 func is_odd(k)  { if (k == 0) { return 0 } return is_even(k - 1) }
-print "  is_even(10001) =>" is_even(10001)
+print "  is_even(50000) =>" is_even(50000)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 16. Higher-order functions
+# § 18. Higher-order functions
 # ──────────────────────────────────────────────────────────────────────
-# map(list, fn)         — apply fn to each element, return new list
-# filter(list, pred)    — keep elements where pred returns truthy
-# reduce(list, fn, seed) — left-fold
-# each(list, fn)        — for side effects, returns nil
-# apply(fn, list)       — call fn with the list as positional args
 
 print ""
-print "══ § 16. Higher-order ════════════════════════════"
-
-print "  map double    =>" map(list(1, 2, 3), func(x) { return x * 2 })
-print "  filter > 2    =>" filter(list(1, 2, 3, 4), func(x) { return x > 2 })
-print "  reduce +      =>" reduce(list(1, 2, 3, 4), func(a, b) { return a + b }, 0)
-print "  reduce *      =>" reduce(list(1, 2, 3, 4), func(a, b) { return a * b }, 1)
-print "  apply         =>" apply(func(a, b, c) { return a + b + c }, list(1, 2, 3))
+print "══ § 18. Higher-order ════════════════════════════"
+print "  map      =>" map(list(1, 2, 3), func(x) { return x + 1 })
+print "  filter   =>" filter(list(0, 1, 2, 3, 4, 5), func(x) { return x % 2 == 0 })
+print "  reduce   =>" reduce(list(1, 2, 3, 4), func(a, b) { return a * b }, 1)
+each(list(1, 2, 3), func(x) { out("  each ") out(x) out("") }) out("\n")
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 17. Errors: try / catch / error / assert
+# § 19. Errors: try / catch / finally / error / assert
 # ──────────────────────────────────────────────────────────────────────
-# Errors are first-class. The catch-bound variable is a dict with:
+# Errors are first-class. The catch-bound variable is a dict with
 #   { message, file, line, trace }   — trace is innermost-first.
-# error(msg) raises; assert(expr [, msg]) raises if expr is falsy and
-# the diagnostic includes the source-form of the asserted expression.
+# `finally` runs in every exit path: normal completion, caught error,
+# uncaught error, and even when the try block returns from a function.
+# Either `catch` or `finally` (or both) must follow `try`.
 
 print ""
-print "══ § 17. Errors ══════════════════════════════════"
+print "══ § 19. Errors ══════════════════════════════════"
 
 # Catching error()
 try {
@@ -521,7 +468,7 @@ try {
     print "  caught e.line    =>" e.line
 }
 
-# Catching a stacked error — trace is populated
+# Stacked error → trace populated
 func deep1() { error("from deep1") }
 func deep2() { deep1() }
 func deep3() { deep2() }
@@ -532,338 +479,207 @@ try {
     for (var t in e.trace) { print "    -" t }
 }
 
-# Assert echoes the expression text
-try {
-    assert(2 + 2 == 5)
-} catch (e) {
-    print "  assert failure   =>" e.message
-}
-
-# Assert with custom message
-try {
-    assert(0, "intentional")
-} catch (e) {
-    print "  assert custom    =>" e.message
-}
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 18. format and out — formatting and raw stdout
-# ──────────────────────────────────────────────────────────────────────
-# format(fmt, args...) — `{}` placeholders, `{{` and `}}` for literal braces
-# out(args...)         — write args' reprs to stdout, no separator, no
-#                        newline (use this for progress dots, prompts, etc.)
-# print args...        — space-separated, trailing newline
-# Combine with format for printf-style:  out(format("...", ...))
-
-print ""
-print "══ § 18. format / out ════════════════════════════"
-print "  basic     =>" format("Hello, {}!", "Ada")
-print "  multi     =>" format("{} + {} = {}", 2, 3, 5)
-print "  literal { =>" format("{{x}}")
-print "  short args=>" format("{} {}", 1)               # leaves second {}
-out("  out (no \\n): ")
-out("part-1 ") out("part-2") out("\n")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 19. Type and conversion
-# ──────────────────────────────────────────────────────────────────────
-# type(x) returns one of: nil, scalar, vec, string, list, dict, func.
-# str, num, vec convert between types.
-
-print ""
-print "══ § 19. Types & conversion ══════════════════════"
-print "  type(nil)     =>" type(nil)
-print "  type(42)      =>" type(42)
-print "  type([1,2])   =>" type([1, 2])
-print "  type(\"hi\")    =>" type("hi")
-print "  type(list(1)) =>" type(list(1))
-print "  type({a:1})   =>" type({a: 1})
-print "  type(square)  =>" type(square)
-print "  str(42)       =>" str(42)
-print "  num(\"3.14\")   =>" num("3.14")
-print "  vec(list(1,2,3)) =>" vec(list(1, 2, 3))
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 20. Regex
-# ──────────────────────────────────────────────────────────────────────
-# match(text, pattern) — std::regex (ECMAScript flavor). Returns a list
-# of [whole_match, group1, group2, ...] or nil if no match.
-
-print ""
-print "══ § 20. Regex ═══════════════════════════════════"
-var m = match("year 2026 month 04", "(\\d{4}) month (\\d{2})")
-print "  matched groups =>" m
-print "  no match       =>" match("hello", "\\d+")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 21. Random
-# ──────────────────────────────────────────────────────────────────────
-# Backed by mt19937_64. seed(n) makes runs reproducible.
-# rand([n])     — vec of n uniform [0,1) values (default 1)
-# shuffle(list-or-vec) — returns a shuffled COPY (not in place)
-
-print ""
-print "══ § 21. Random ══════════════════════════════════"
-seed(42)
-print "  rand(3)        =>" rand(3)
-seed(42)
-print "  rand(3) again  =>" rand(3)             # identical: seeded
-seed(1)
-print "  shuffle list   =>" shuffle(list(1, 2, 3, 4, 5))
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 22. I/O
-# ──────────────────────────────────────────────────────────────────────
-# read(path)         — returns whole file as string
-# write(path, val)   — writes repr(val), overwriting
-# append(path, val)  — appends repr(val)
-# Paths are relative to the current working directory.
-
-print ""
-print "══ § 22. I/O ═════════════════════════════════════"
-write("flux_demo.tmp", "first line")
-append("flux_demo.tmp", " + appended")
-print "  file contents  =>" read("flux_demo.tmp")
-exec("rm -f flux_demo.tmp")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 23. System
-# ──────────────────────────────────────────────────────────────────────
-# clock()         — seconds since some epoch (high-resolution monotonic)
-# sleep(seconds)  — block this thread (real-valued)
-# env(name)       — environment variable string or nil
-# exec(cmd)       — run shell command, capture stdout as string
-# exit(code)      — terminate immediately (not run here)
-
-print ""
-print "══ § 23. System ══════════════════════════════════"
-var t0 = clock()
-sleep(0.001)
-var t1 = clock()
-print "  elapsed (s)    =>" (t1 - t0)
-print "  env(\"HOME\")    =>" env("HOME")
-print "  exec echo      =>" trim(exec("echo from-shell"))
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 24. Introspection
-# ──────────────────────────────────────────────────────────────────────
-# vars()      — sorted list of names visible in the current scope
-# bindings()  — same, but as a dict {name: value, ...}
-# eval(src)   — parse + execute string in the CURRENT scope; returns
-#               the value of the last expression.
-
-print ""
-print "══ § 24. Introspection ═══════════════════════════"
-
-func demo_introspection() {
-    var local_var = 99
-    return list(len(vars()), bindings().local_var)
-}
-print "  inside func    =>" demo_introspection()
-
-# eval runs in the caller's scope, so it can both read and write outer vars
-var dynamic = 0
-eval("dynamic = 7 * 6")
-print "  eval set var   =>" dynamic
-print "  eval expr      =>" eval("1 + 2 + 3")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 25. Loading other files
-# ──────────────────────────────────────────────────────────────────────
-# load("path") — runs another .flux file in the current scope. Loads
-# are memoized by canonical path (loading the same file twice is a
-# no-op), and circular loads are safely broken. Search order:
-#   1. relative to the current source file
-#   2. each entry in $FLUX_PATH (colon-separated on Unix, ; on Windows)
-#   3. ~/.flux/ (or %USERPROFILE%/.flux/ on Windows)
-
-print ""
-print "══ § 25. load ════════════════════════════════════"
-write("greet.flux", "func greet(name) { return concat(\"hello \", name) }")
-load("greet.flux")
-print "  loaded greet   =>" greet("Ada")
-load("greet.flux")                      # second load is a no-op (memoized)
-print "  load is memoized — no re-execution"
-exec("rm -f greet.flux")
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 26. Cooperative scheduling hook (host-side feature)
-# ──────────────────────────────────────────────────────────────────────
-# Hosts embedding flux can call `interp.set_yield(fn)` from C++ to
-# install a callback invoked at every loop iteration, every block
-# statement, and every function call. This lets the host implement
-# cancellation, time-slicing, or progress reporting without changing
-# the language. There's no flux-level API for it; mentioned here for
-# completeness.
-
-print ""
-print "══ § 26. Cooperative scheduling ══════════════════"
-print "  (host-side: see Interpreter::set_yield in flux.h)"
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 27. Buffers — first-class audio
-# ──────────────────────────────────────────────────────────────────────
-# A Buffer holds an interleaved array of doubles plus n_frames,
-# n_channels, and sample_rate. It is reference-shared (like list and
-# dict). Index it as buf[i] (returns scalar for mono, vec for
-# multichannel) or buf[i, c] (always scalar). `for f in buf` iterates
-# per-frame values. Convert with buffer_to_vec / vec_to_buffer.
-#
-# Buffers are intended to be the bridge between Flux and host C++ DSP
-# code: hosts allocate them, fill them with `read_audio(...)`-style
-# native functions, and pass them back for analysis or transformation.
-
-print ""
-print "══ § 27. Buffers ═════════════════════════════════"
-var buf = buffer(8, 2, 48000)        # 8 frames, stereo, 48 kHz
-print "  buf            =>" buf
-print "  frames         =>" frames(buf)
-print "  channels       =>" channels(buf)
-print "  sample_rate    =>" sample_rate(buf)
-
-# Element write
-buf[0, 0] = 0.5  buf[0, 1] = -0.5
-buf[1, 0] = 0.7  buf[1, 1] = -0.7
-print "  buf[0]         =>" buf[0]            # vec [0.5, -0.5]
-print "  buf[1, 0]      =>" buf[1, 0]
-print "  len(buf)       =>" len(buf)
-
-# Whole-frame assignment with a vec
-buf[2] = [0.1, 0.9]
-print "  buf[2] = [..]  =>" buf[2]
-
-# Iteration
-var summed = 0
-for (var fr in buf) { summed = summed + sum(fr) }
-print "  sum of frames  =>" summed
-
-# Conversions
-var v = vec_to_buffer([1, 2, 3, 4], 22050)
-print "  vec→buffer     =>" buffer_to_vec(v)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 28. Opaque — host-side handles
-# ──────────────────────────────────────────────────────────────────────
-# Opaque values wrap a `shared_ptr<void>` plus a type tag. They are
-# created by the C++ host (FFT plans, file handles, ML model weights,
-# audio streams, …). From Flux you can pass them around, store them in
-# dicts, ask their type tag, and hand them back to native functions.
-# They are intentionally inert from the Flux side.
-#
-# (This section just shows what they print as; you'll create real ones
-# from C++ via:
-#     interp.register_builtin("make_plan", [](...){
-#         return flux::Value(flux::Opaque{"fft_plan",
-#                            std::make_shared<MyPlan>(...)});
-#     });
-# )
-
-print ""
-print "══ § 28. Opaque (host-side) ══════════════════════"
-print "  no Flux-side constructor — host C++ creates them"
-print "  type(x) returns \"opaque\"; opaque_type(x) returns the tag"
-
-
-# ──────────────────────────────────────────────────────────────────────
-# § 29. try / finally
-# ──────────────────────────────────────────────────────────────────────
-# `finally` is RAII for Flux. The block runs whether the try succeeded,
-# threw an error caught by `catch`, threw an uncaught error, or even
-# `return`ed out of an enclosing function. If `finally` itself throws,
-# its exception replaces any saved one (matches Java/Python semantics).
-# `catch` and `finally` are both optional, but at least one must be
-# present after a try.
-
-print ""
-print "══ § 29. try / finally ═══════════════════════════"
-
-# Cleanup pattern: ensure a buffer is "released" (here, just logged)
-# regardless of how the try block exits.
-func process() {
+# finally runs after caught errors AND after returns out of try
+func process(should_fail) {
     var log = list()
     try {
         push(log, "open")
+        if (should_fail) { error("nope") }
+        push(log, "work")
         return list("ok", log)
+    } catch (e) {
+        push(log, concat("caught:", e.message))
+        return list("err", log)
     } finally {
         push(log, "close")
     }
 }
-print "  process()      =>" process()
+print "  process(0)    =>" process(0)
+print "  process(1)    =>" process(1)
 
-# Catch + finally
-var seq = list()
-try {
-    push(seq, "try")
-    error("fail")
-} catch (e) {
-    push(seq, "catch")
-} finally {
-    push(seq, "finally")
-}
-print "  catch+finally  =>" seq
+# assert echoes expression text
+try { assert(2 + 2 == 5) }
+catch (e) { print "  assert echo  =>" e.message }
+
+# Error messages on type mismatches now name the operator AND the types:
+func msg(thunk) { try { thunk() } catch (e) { return e.message } }
+print "  scalar+string =>" msg(func() { return 1 + "x" })
+print "  buf+vec       =>" msg(func() { return buffer(2) + [1, 2] })
+print "  vec mismatch  =>" msg(func() { return [1,2] + [1,2,3] })
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 30. Docstrings & help()
+# § 20. Docstrings & help()
 # ──────────────────────────────────────────────────────────────────────
 # A string literal as the first statement of a function body is captured
-# as its documentation. help(fn) returns it; help("name") looks up
-# native builtins by name. Use this to make libraries self-documenting.
+# as its docstring. help(fn) returns it; help("name") looks up native
+# builtins by name. Use this to keep libraries self-documenting.
 
 print ""
-print "══ § 30. Docstrings & help() ═════════════════════"
-
-func add(a, b) {
-    "Sum two scalars."
-    return a + b
+print "══ § 20. Docstrings & help() ═════════════════════"
+func gain(x, db) {
+    "Apply a gain in dB to a sample, vec, or buffer."
+    return x * pow(10, db / 20)
 }
-print "  help(add)      =>" help(add)
-print "  help(\"buffer\") =>" help("buffer")
-print "  help(\"sin\")    =>" help("sin")           # no doc registered for sin
+print "  help(gain)        =>" help(gain)
+print "  help(\"buffer\")    =>" help("buffer")
+print "  help(\"sin\")       =>" help("sin")          # no doc registered for sin
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 31. Cycle protection
+# § 21. format and out — formatting and raw stdout
 # ──────────────────────────────────────────────────────────────────────
-# Self-referential lists and dicts now have well-defined repr() and
-# equality — no more stack overflow on legitimate-looking data.
+# format(fmt, args...) — `{}` placeholders, `{{` and `}}` for literals
+# out(args...)         — write reprs to stdout, no separator, no newline
+# print args...        — space-separated, trailing newline
 
 print ""
-print "══ § 31. Cycle protection ════════════════════════"
-var cyc = list(1, 2)
-push(cyc, cyc)
-print "  cyclic list    =>" cyc                  # (1, 2, (...))
-
-var cdict = {tag: "self"}
-cdict.me = cdict
-print "  cyclic dict    =>" cdict                # {me: {...}, tag: self}
+print "══ § 21. format / out ════════════════════════════"
+print "  basic     =>" format("Hello, {}!", "Ada")
+print "  multi     =>" format("{} + {} = {}", 2, 3, 5)
+print "  literals  =>" format("{{x}} and {}", 7)
+out("  out chain : ") out("part-1 ") out("part-2") out("\n")
 
 
 # ──────────────────────────────────────────────────────────────────────
-# § 32. bench / version
+# § 22. Type and conversion
 # ──────────────────────────────────────────────────────────────────────
-# bench(thunk) returns the wall-clock seconds taken to run the thunk.
-# `flux_version` is a global string constant.
 
 print ""
-print "══ § 32. bench & version ═════════════════════════"
-print "  flux_version   =>" flux_version
-var t = bench(func() {
+print "══ § 22. Types & conversion ══════════════════════"
+print "  type(42)        =>" type(42)
+print "  type([1,2])     =>" type([1, 2])
+print "  type(\"hi\")      =>" type("hi")
+print "  type(buffer(3)) =>" type(buffer(3))
+print "  num(\"3.14\")     =>" num("3.14")
+print "  str(42)         =>" str(42)
+print "  vec(list(1,2,3))=>" vec(list(1, 2, 3))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 23. Regex
+# ──────────────────────────────────────────────────────────────────────
+# match(pattern, str) returns a list of (full_match, capture1, …) for the
+# first match, or nil. ECMAScript regex syntax (std::regex default).
+
+print ""
+print "══ § 23. Regex ═══════════════════════════════════"
+print "  match     =>" match("(\\d+)-(\\w+)", "build 42-final ok")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 24. Random
+# ──────────────────────────────────────────────────────────────────────
+
+print ""
+print "══ § 24. Random ══════════════════════════════════"
+seed(0)
+print "  rand()    =>" rand()
+print "  rand(10)  =>" rand(10)
+print "  rand(2,5) =>" rand(2, 5)
+print "  shuffle   =>" shuffle([1, 2, 3, 4, 5])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 25. I/O
+# ──────────────────────────────────────────────────────────────────────
+
+print ""
+print "══ § 25. I/O ═════════════════════════════════════"
+write("/tmp/_flux_ref.txt", "hello flux\n")
+append("/tmp/_flux_ref.txt", "more\n")
+print "  read      =>" read("/tmp/_flux_ref.txt")
+exec("rm -f /tmp/_flux_ref.txt")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 26. System
+# ──────────────────────────────────────────────────────────────────────
+
+print ""
+print "══ § 26. System ══════════════════════════════════"
+print "  clock     =>" type(clock())
+print "  HOME?     =>" (env("HOME") != nil)
+# sleep(0.001) — uncomment to see it work; we skip for fast test runs
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 27. Introspection — vars / bindings / eval / bench / version
+# ──────────────────────────────────────────────────────────────────────
+# vars()      — sorted list of names visible in the current scope
+# bindings()  — dict {name: value} of visible bindings
+# eval(src)   — parse + execute src in the CURRENT scope (not isolated)
+# bench(thunk)— call thunk() and return wall-clock seconds taken
+# flux_version— string constant
+
+print ""
+print "══ § 27. Introspection ═══════════════════════════"
+if (1) {
+    var local_demo = 7
+    print "  vars sample      =>" len(vars())
+    eval("local_demo = local_demo * 6")
+    print "  eval mutates outer =>" local_demo
+}
+
+var elapsed = bench(func() {
     var s = 0
     for (var i in range(10000)) { s = s + i }
 })
-print "  10k loop took  =>" t "seconds"
+print "  10k loop took    =>" elapsed "s"
+print "  flux_version     =>" flux_version
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 28. Loading other files
+# ──────────────────────────────────────────────────────────────────────
+# load("path") executes another file in the current scope. Loads are
+# memoized by canonical path — re-loading is a no-op, which also breaks
+# circular load chains.
+
+print ""
+print "══ § 28. load ════════════════════════════════════"
+print "  (this section just describes load — examples"
+print "   require an external file. Search order: relative to the"
+print "   loading file, then \\$FLUX_PATH, then ~/.flux/.)"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 29. Cooperative scheduling hook (host-side feature)
+# ──────────────────────────────────────────────────────────────────────
+# A C++ host can install a yield callback that fires at every loop
+# iteration, every block step, and every function call. Use it for
+# cancellation, time-slicing, or progress reporting:
+#
+#   interp.set_yield([&]{
+#       if (stop_requested) flux::err("<host>", 0, "interrupted");
+#   });
+
+print ""
+print "══ § 29. Cooperative scheduling ══════════════════"
+print "  (host-side: see Interpreter::set_yield in flux.h)"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# § 30. Cycle protection
+# ──────────────────────────────────────────────────────────────────────
+# Self-referential lists/dicts have well-defined repr() and equality —
+# no stack overflow on legitimate-looking data. Equality is co-inductive:
+# revisiting an in-progress pair returns true.
+
+print ""
+print "══ § 30. Cycle protection ════════════════════════"
+var cyc = list(1, 2)
+push(cyc, cyc)
+print "  cyclic list    =>" cyc                     # (1, 2, (...))
+
+var cdict = {tag: "self"}
+cdict.me = cdict
+print "  cyclic dict    =>" cdict                   # {me: {...}, tag: self}
+
+# Equality on cyclic structures terminates
+var p = list(1)  push(p, p)
+var q = list(1)  push(q, q)
+print "  cyclic ==      =>" (p == q)
 
 
 # ════════════════════════════════════════════════════════════════════════

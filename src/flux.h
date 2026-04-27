@@ -1453,7 +1453,21 @@ struct Interpreter {
                 for (size_t i = 0; i < v.size(); ++i) r[i] = v[v.size() - 1 - i];
                 return Value(r);
             }
-            err(f, ln, "reverse: unsupported type");
+            if (a[0].is_buffer()) {
+                // Reverse frame order; samples within a frame keep their channel.
+                auto& b = a[0].as_buffer();
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = b.n_frames;
+                out->n_channels = b.n_channels;
+                out->sample_rate = b.sample_rate;
+                out->data.resize(b.data.size());
+                for (size_t i = 0; i < b.n_frames; ++i)
+                    for (size_t c = 0; c < b.n_channels; ++c)
+                        out->data[i * b.n_channels + c] =
+                            b.data[(b.n_frames - 1 - i) * b.n_channels + c];
+                return Value(out);
+            }
+            err(f, ln, "reverse: unsupported type " + Interpreter::type_label(a[0]));
         });
 
         reg("slice", [](auto& a, int ln, auto& f) -> Value {
@@ -1488,7 +1502,29 @@ struct Interpreter {
                 if (stop > (int)s.size()) stop = (int)s.size();
                 return Value(Str(s.substr(start, stop - start)));
             }
-            err(f, ln, "slice: unsupported type");
+            if (a[0].is_buffer()) {
+                // Slice over frames; channels and sample rate are preserved.
+                // The new buffer is a copy — slicing does not alias the source
+                // (consistent with vec/list/string slice semantics).
+                auto& b = a[0].as_buffer();
+                int nf = (int)b.n_frames;
+                if (start < 0) start += nf;
+                if (stop  < 0) stop  += nf;
+                if (start < 0) start = 0;
+                if (stop > nf) stop = nf;
+                int n = std::max(0, stop - start);
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = (size_t)n;
+                out->n_channels = b.n_channels;
+                out->sample_rate = b.sample_rate;
+                out->data.assign((size_t)n * b.n_channels, 0.0);
+                for (int i = 0; i < n; ++i)
+                    for (size_t c = 0; c < b.n_channels; ++c)
+                        out->data[i * b.n_channels + c] =
+                            b.data[(start + i) * b.n_channels + c];
+                return Value(out);
+            }
+            err(f, ln, "slice: unsupported type " + Interpreter::type_label(a[0]));
         });
 
         reg("concat", [](auto& a, int ln, auto& f) -> Value {
@@ -1514,15 +1550,88 @@ struct Interpreter {
                 for (auto& kv : a[1].as_dict()) (*d)[kv.first] = kv.second;
                 return Value(d);
             }
-            err(f, ln, "concat expects two values of the same type (string, list, vec, or dict)");
+            if (a[0].is_buffer() && a[1].is_buffer()) {
+                // Append second buffer's frames after first's. Channels and
+                // sample rates must match; otherwise the result would be
+                // ambiguous and silently wrong.
+                auto& ba = a[0].as_buffer();
+                auto& bb = a[1].as_buffer();
+                if (ba.n_channels != bb.n_channels)
+                    err(f, ln, "concat: buffer channel counts differ ("
+                             + std::to_string(ba.n_channels) + " vs "
+                             + std::to_string(bb.n_channels) + ")");
+                if (ba.sample_rate != bb.sample_rate)
+                    err(f, ln, "concat: buffer sample rates differ ("
+                             + Value::fmt(ba.sample_rate) + " vs "
+                             + Value::fmt(bb.sample_rate) + ")");
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = ba.n_frames + bb.n_frames;
+                out->n_channels = ba.n_channels;
+                out->sample_rate = ba.sample_rate;
+                out->data.reserve(ba.data.size() + bb.data.size());
+                out->data.insert(out->data.end(), ba.data.begin(), ba.data.end());
+                out->data.insert(out->data.end(), bb.data.begin(), bb.data.end());
+                return Value(out);
+            }
+            err(f, ln, "concat: cannot concatenate "
+                     + Interpreter::type_label(a[0]) + " and "
+                     + Interpreter::type_label(a[1]));
         });
 
-        // ── vec: reductions ───────────────────────────────────────────
-        reg("sum",  [](auto& a, int ln, auto& f) -> Value { ck("sum",  a, 1, ln, f); nv("sum",  a[0], ln, f); return Value(a[0].as_vec().sum()); });
-        reg("mean", [](auto& a, int ln, auto& f) -> Value { ck("mean", a, 1, ln, f); nv("mean", a[0], ln, f);
-            auto& v = a[0].as_vec(); return Value(v.sum() / (double)v.size()); });
-        reg("min",  [](auto& a, int ln, auto& f) -> Value { ck("min",  a, 1, ln, f); nv("min",  a[0], ln, f); return Value(a[0].as_vec().min()); });
-        reg("max",  [](auto& a, int ln, auto& f) -> Value { ck("max",  a, 1, ln, f); nv("max",  a[0], ln, f); return Value(a[0].as_vec().max()); });
+        // ── vec / buffer: reductions ──────────────────────────────────
+        // Buffers reduce over their flat sample array. For multi-channel
+        // buffers this means "sum/min/max/mean over all samples"; if you
+        // want a per-channel reduction you'll iterate frames yourself.
+        auto reduce_data = [](const Value& v, const char* op_for_err,
+                              double seed, auto step) -> double {
+            const double* p; size_t n;
+            if (v.is_vec())    { auto& x = v.as_vec();    p = &x[0];        n = x.size(); }
+            else /* buffer */  { auto& x = v.as_buffer(); p = x.data.data(); n = x.data.size(); }
+            (void)op_for_err;
+            double r = seed;
+            for (size_t i = 0; i < n; ++i) r = step(r, p[i], i);
+            return r;
+        };
+        reg("sum",  [reduce_data](auto& a, int ln, auto& f) -> Value {
+            ck("sum", a, 1, ln, f);
+            if (!a[0].is_vec() && !a[0].is_buffer())
+                err(f, ln, "sum: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+            return Value(reduce_data(a[0], "sum", 0.0,
+                [](double r, double x, size_t) { return r + x; }));
+        });
+        reg("mean", [](auto& a, int ln, auto& f) -> Value {
+            ck("mean", a, 1, ln, f);
+            if (a[0].is_vec()) { auto& v = a[0].as_vec(); return Value(v.sum() / (double)v.size()); }
+            if (a[0].is_buffer()) {
+                auto& b = a[0].as_buffer();
+                if (b.data.empty()) return Value(0.0);
+                double s = 0; for (double x : b.data) s += x;
+                return Value(s / (double)b.data.size());
+            }
+            err(f, ln, "mean: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+        });
+        reg("min",  [](auto& a, int ln, auto& f) -> Value {
+            ck("min", a, 1, ln, f);
+            if (a[0].is_vec()) return Value(a[0].as_vec().min());
+            if (a[0].is_buffer()) {
+                auto& b = a[0].as_buffer();
+                if (b.data.empty()) err(f, ln, "min: empty buffer");
+                double m = b.data[0]; for (double x : b.data) if (x < m) m = x;
+                return Value(m);
+            }
+            err(f, ln, "min: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+        });
+        reg("max",  [](auto& a, int ln, auto& f) -> Value {
+            ck("max", a, 1, ln, f);
+            if (a[0].is_vec()) return Value(a[0].as_vec().max());
+            if (a[0].is_buffer()) {
+                auto& b = a[0].as_buffer();
+                if (b.data.empty()) err(f, ln, "max: empty buffer");
+                double m = b.data[0]; for (double x : b.data) if (x > m) m = x;
+                return Value(m);
+            }
+            err(f, ln, "max: expected vec or buffer, got " + Interpreter::type_label(a[0]));
+        });
 
         // ── vec: element-wise math ────────────────────────────────────
         auto m1 = [this](const char* nm, Vec(*op)(const Vec&)) {
@@ -2056,10 +2165,27 @@ struct Interpreter {
             if (a.size() < 1 || a.size() > 3)
                 err(f, ln, "buffer expects 1-3 args (frames [, channels [, sample_rate]])");
             for (auto& x : a) nv("buffer", x, ln, f);
+            double df = a[0].scalar();
+            if (df < 0) err(f, ln, "buffer: frames must be non-negative (got "
+                                  + Value::fmt(df) + ")");
             auto b = std::make_shared<Buffer>();
-            b->n_frames    = (size_t)std::max(0.0, a[0].scalar());
-            b->n_channels  = a.size() >= 2 ? (size_t)std::max(1.0, a[1].scalar()) : 1;
-            b->sample_rate = a.size() >= 3 ? a[2].scalar() : 44100.0;
+            b->n_frames = (size_t)df;
+            if (a.size() >= 2) {
+                double dc = a[1].scalar();
+                if (dc < 1) err(f, ln, "buffer: channels must be >= 1 (got "
+                                      + Value::fmt(dc) + ")");
+                b->n_channels = (size_t)dc;
+            } else {
+                b->n_channels = 1;
+            }
+            if (a.size() >= 3) {
+                double sr = a[2].scalar();
+                if (sr <= 0) err(f, ln, "buffer: sample_rate must be positive (got "
+                                       + Value::fmt(sr) + ")");
+                b->sample_rate = sr;
+            } else {
+                b->sample_rate = 44100.0;
+            }
             b->data.assign(b->n_frames * b->n_channels, 0.0);
             return Value(b);
         });
@@ -2174,36 +2300,125 @@ struct Interpreter {
     }
 
     // ── broadcast binary op ───────────────────────────────────────────
+    // Human-readable type name for error diagnostics. Mirrors value_kind_name
+    // but is also defined for the binop path which may run before that gets
+    // called. Kept inline to avoid forward-declaration noise.
+    static std::string type_label(const Value& v) {
+        if (v.is_nil())     return "nil";
+        if (v.is_vec())     return v.as_vec().size() == 1 ? "scalar" : "vec";
+        if (v.is_str())     return "string";
+        if (v.is_list())    return "list";
+        if (v.is_dict())    return "dict";
+        if (v.is_buffer())  return "buffer";
+        if (v.is_opaque())  return "opaque:" + v.as_opaque().type_tag;
+        if (v.is_closure() || v.is_native()) return "func";
+        return "?";
+    }
+
+    // Apply a numeric binary op to two flat arrays of doubles into r (size n).
+    // Caller guarantees va.size() == vb.size() == n.
+    static void apply_double_op(const double* a, const double* b, double* r,
+                                size_t n, const std::string& op) {
+        if      (op == "+") for (size_t i = 0; i < n; ++i) r[i] = a[i] + b[i];
+        else if (op == "-") for (size_t i = 0; i < n; ++i) r[i] = a[i] - b[i];
+        else if (op == "*") for (size_t i = 0; i < n; ++i) r[i] = a[i] * b[i];
+        else if (op == "/") for (size_t i = 0; i < n; ++i) r[i] = a[i] / b[i];
+        else if (op == "%") for (size_t i = 0; i < n; ++i) r[i] = std::fmod(a[i], b[i]);
+        else if (op == "==") for (size_t i = 0; i < n; ++i) r[i] = a[i] == b[i];
+        else if (op == "!=") for (size_t i = 0; i < n; ++i) r[i] = a[i] != b[i];
+        else if (op == "<")  for (size_t i = 0; i < n; ++i) r[i] = a[i] <  b[i];
+        else if (op == ">")  for (size_t i = 0; i < n; ++i) r[i] = a[i] >  b[i];
+        else if (op == "<=") for (size_t i = 0; i < n; ++i) r[i] = a[i] <= b[i];
+        else if (op == ">=") for (size_t i = 0; i < n; ++i) r[i] = a[i] >= b[i];
+        // op already validated by the caller
+    }
+
     Value vec_binop(const Value& a, const Value& b, const std::string& op,
                     int ln, const std::string& f) {
-        // Equality / inequality: scalar 0/1 via deep_eq for any non-(vec,vec)
-        // pair (mixed types, lists, dicts, strings, nil). Vec-vs-vec keeps
-        // element-wise broadcasting.
+        // Equality / inequality: scalar 0/1 via deep_eq for any non-(numeric)
+        // pair (mixed types, lists, dicts, strings, nil, buffers via identity).
+        // (vec, vec), (vec, buffer), and (buffer, buffer) keep element-wise.
+        bool a_num = a.is_vec() || a.is_buffer();
+        bool b_num = b.is_vec() || b.is_buffer();
         if (op == "==" || op == "!=") {
-            if (!a.is_vec() || !b.is_vec()) {
+            if (!a_num || !b_num) {
                 bool eq = Value::deep_eq(a, b);
                 return Value(op == "==" ? (eq ? 1.0 : 0.0) : (eq ? 0.0 : 1.0));
             }
         }
-        if (!a.is_vec() || !b.is_vec()) err(f, ln, "invalid operands for '" + op + "'");
+        if (!a_num || !b_num) {
+            err(f, ln, "operator '" + op + "': cannot apply to "
+                     + type_label(a) + " and " + type_label(b));
+        }
+
+        // ── buffer arithmetic ────────────────────────────────────────
+        // (buffer, buffer): shapes must match; sample rates must match.
+        // (buffer, scalar)/(scalar, buffer): broadcast across samples.
+        // Result is a new buffer with the same shape and sample rate.
+        // (buffer, non-scalar vec) is a shape error — buffers don't broadcast
+        // against arbitrary vecs because the layout intent is ambiguous.
+        if (a.is_buffer() || b.is_buffer()) {
+            if (a.is_buffer() && b.is_buffer()) {
+                auto& ba = a.as_buffer();
+                auto& bb = b.as_buffer();
+                if (ba.n_frames != bb.n_frames || ba.n_channels != bb.n_channels)
+                    err(f, ln, "operator '" + op + "': buffer shapes differ ("
+                             + std::to_string(ba.n_frames) + "x" + std::to_string(ba.n_channels)
+                             + " vs " + std::to_string(bb.n_frames) + "x" + std::to_string(bb.n_channels) + ")");
+                if (ba.sample_rate != bb.sample_rate)
+                    err(f, ln, "operator '" + op + "': buffer sample rates differ ("
+                             + Value::fmt(ba.sample_rate) + " vs " + Value::fmt(bb.sample_rate) + ")");
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = ba.n_frames;
+                out->n_channels = ba.n_channels;
+                out->sample_rate = ba.sample_rate;
+                out->data.resize(ba.data.size());
+                apply_double_op(ba.data.data(), bb.data.data(),
+                                out->data.data(), ba.data.size(), op);
+                return Value(out);
+            }
+            // Buffer ⊕ scalar (or scalar ⊕ buffer)
+            const Value& buf_v = a.is_buffer() ? a : b;
+            const Value& sca_v = a.is_buffer() ? b : a;
+            if (!sca_v.is_vec() || sca_v.as_vec().size() != 1)
+                err(f, ln, "operator '" + op + "': buffer can only combine with scalar or same-shape buffer (got "
+                         + type_label(sca_v) + ")");
+            auto& src = buf_v.as_buffer();
+            double k = sca_v.scalar();
+            auto out = std::make_shared<Buffer>();
+            out->n_frames = src.n_frames;
+            out->n_channels = src.n_channels;
+            out->sample_rate = src.sample_rate;
+            out->data.resize(src.data.size());
+            // For non-commutative ops the order matters: scalar - buffer is
+            // (scalar - x_i) for each i, not (x_i - scalar).
+            std::vector<double> rhs(src.data.size(), k);
+            if (a.is_buffer())
+                apply_double_op(src.data.data(), rhs.data(),
+                                out->data.data(), src.data.size(), op);
+            else
+                apply_double_op(rhs.data(), src.data.data(),
+                                out->data.data(), src.data.size(), op);
+            return Value(out);
+        }
+
+        // ── vec arithmetic ───────────────────────────────────────────
         Vec va = a.as_vec(), vb = b.as_vec();
         if (va.size() == 1 && vb.size() > 1) { Vec t(vb.size()); t = va[0]; va = t; }
         if (vb.size() == 1 && va.size() > 1) { Vec t(va.size()); t = vb[0]; vb = t; }
         if (va.size() != vb.size())
-            err(f, ln, "vector size mismatch (" + std::to_string(va.size()) + " vs " + std::to_string(vb.size()) + ")");
+            err(f, ln, "operator '" + op + "': vector size mismatch ("
+                     + std::to_string(va.size()) + " vs " + std::to_string(vb.size()) + ")");
         Vec r(va.size());
         if      (op == "+") r = va + vb;
         else if (op == "-") r = va - vb;
         else if (op == "*") r = va * vb;
         else if (op == "/") r = va / vb;
-        else if (op == "%") { for (size_t i = 0; i < va.size(); ++i) r[i] = std::fmod(va[i], vb[i]); }
-        else if (op == "==") { for (size_t i = 0; i < va.size(); ++i) r[i] = va[i] == vb[i]; }
-        else if (op == "!=") { for (size_t i = 0; i < va.size(); ++i) r[i] = va[i] != vb[i]; }
-        else if (op == "<")  { for (size_t i = 0; i < va.size(); ++i) r[i] = va[i] <  vb[i]; }
-        else if (op == ">")  { for (size_t i = 0; i < va.size(); ++i) r[i] = va[i] >  vb[i]; }
-        else if (op == "<=") { for (size_t i = 0; i < va.size(); ++i) r[i] = va[i] <= vb[i]; }
-        else if (op == ">=") { for (size_t i = 0; i < va.size(); ++i) r[i] = va[i] >= vb[i]; }
-        else err(f, ln, "unknown op '" + op + "'");
+        else if (op == "%" || op == "==" || op == "!=" ||
+                 op == "<"  || op == ">"  || op == "<=" || op == ">=") {
+            apply_double_op(&va[0], &vb[0], &r[0], va.size(), op);
+        }
+        else err(f, ln, "operator '" + op + "': unknown");
         return Value(r);
     }
 
@@ -2372,11 +2587,21 @@ struct Interpreter {
         case NodeT::UnaryOp:
             if (e->op == "-") {
                 auto v = eval(e->left, env);
-                if (!v.is_vec()) err(f, ln, "cannot negate non-numeric");
-                return Value(-v.as_vec());
+                if (v.is_vec()) return Value(-v.as_vec());
+                if (v.is_buffer()) {
+                    auto& b = v.as_buffer();
+                    auto out = std::make_shared<Buffer>();
+                    out->n_frames = b.n_frames;
+                    out->n_channels = b.n_channels;
+                    out->sample_rate = b.sample_rate;
+                    out->data.resize(b.data.size());
+                    for (size_t i = 0; i < b.data.size(); ++i) out->data[i] = -b.data[i];
+                    return Value(out);
+                }
+                err(f, ln, "unary '-': cannot negate " + type_label(v));
             }
             if (e->op == "not") return Value(eval(e->left, env).truthy() ? 0.0 : 1.0);
-            err(f, ln, "unknown unary");
+            err(f, ln, "unknown unary '" + e->op + "'");
         case NodeT::Call: {
             // vars() — sorted list of names visible from the current scope.
             if (e->left->type == NodeT::Id && e->left->str_val == "vars" && e->args.empty()) {

@@ -690,6 +690,105 @@ expect_err("buf out of range", func() { var b = buffer(5)  return b[10] })
 expect_err("buf chan oob",     func() { var b = buffer(5, 2)  return b[0, 5] })
 expect_err("multi-idx on vec", func() { return [1, 2, 3][0, 1] })
 expect_err("scalar to multich", func() { var b = buffer(5, 2)  b[0] = 1.0  return 0 })
+expect_err("buf neg frames",   func() { return buffer(-5) })
+expect_err("buf 0 channels",   func() { return buffer(10, 0) })
+expect_err("buf neg sr",       func() { return buffer(10, 1, -1) })
+
+# ── Buffer arithmetic ─────────────────────────────────────────────────
+section("Buffer arithmetic")
+var ab = vec_to_buffer([1, 2, 3, 4])
+
+# scalar broadcast
+ok("buf * scalar type",   type(ab * 0.5) == "buffer")
+ok("buf * scalar values", buffer_to_vec(ab * 0.5) == [0.5, 1, 1.5, 2])
+ok("scalar - buf",        buffer_to_vec(10 - ab) == [9, 8, 7, 6])
+ok("buf + scalar",        buffer_to_vec(ab + 1) == [2, 3, 4, 5])
+
+# buffer + buffer
+ok("buf + buf",           buffer_to_vec(ab + ab) == [2, 4, 6, 8])
+ok("buf * buf",           buffer_to_vec(ab * ab) == [1, 4, 9, 16])
+
+# unary minus
+ok("-buffer",             buffer_to_vec(-ab) == [-1, -2, -3, -4])
+ok("-buffer preserves type", type(-ab) == "buffer")
+
+# stereo
+var stereo = buffer(2, 2)
+stereo[0] = [1, 2]
+stereo[1] = [3, 4]
+ok("stereo * 2",          buffer_to_vec(stereo * 2) == [2, 4, 6, 8])
+ok("stereo result chans", channels(stereo * 2) == 2)
+
+# preserves sample_rate
+var sr_buf = vec_to_buffer([1, 2, 3], 48000)
+ok("sr preserved",        sample_rate(sr_buf * 2) == 48000)
+
+# Shape-mismatch errors (new)
+expect_err("buf shape diff",       func() { return buffer(2,2) + buffer(3,2) })
+expect_err("buf chan diff",        func() { return buffer(2,2) + buffer(2,1) })
+expect_err("buf sr diff",          func() { return buffer(2,1,44100) + buffer(2,1,48000) })
+expect_err("buf + vec rejected",   func() { return buffer(2) + [1, 2] })
+
+# Reductions on buffer
+ok("sum(buffer)",         sum(ab) == 10)
+ok("max(buffer)",         max(ab) == 4)
+ok("min(buffer)",         min(ab) == 1)
+ok("mean(buffer)",        mean(ab) == 2.5)
+
+# ── Buffer slice / reverse / concat ───────────────────────────────────
+section("Buffer slice/reverse/concat")
+var big = vec_to_buffer([10, 20, 30, 40, 50, 60, 70, 80])
+
+var win = slice(big, 2, 5)
+ok("slice frames",        frames(win) == 3)
+ok("slice values",        buffer_to_vec(win) == [30, 40, 50])
+ok("slice preserves sr",  sample_rate(win) == sample_rate(big))
+
+# negative indices
+var tail = slice(big, -3, -1)
+ok("slice negative",      buffer_to_vec(tail) == [60, 70])
+
+# slice does not alias
+win[0] = 999
+ok("slice detached",      big[2] == 30)
+
+# stereo slice keeps channels
+var st = buffer(4, 2)
+st[0] = [1,1]  st[1] = [2,2]  st[2] = [3,3]  st[3] = [4,4]
+var stslice = slice(st, 1, 3)
+ok("stereo slice frames", frames(stslice) == 2)
+ok("stereo slice chans",  channels(stslice) == 2)
+ok("stereo slice values", buffer_to_vec(stslice) == [2, 2, 3, 3])
+
+# reverse
+ok("reverse buffer",      buffer_to_vec(reverse(big)) == [80, 70, 60, 50, 40, 30, 20, 10])
+var rev_st = reverse(st)
+ok("reverse stereo frame0", buffer_to_vec(slice(rev_st, 0, 1)) == [4, 4])
+
+# concat
+var aa = vec_to_buffer([1, 2])
+var bb_ = vec_to_buffer([3, 4, 5])
+ok("concat buffers",      buffer_to_vec(concat(aa, bb_)) == [1, 2, 3, 4, 5])
+ok("concat preserves sr", sample_rate(concat(aa, bb_)) == 44100)
+
+expect_err("concat chan diff", func() { return concat(buffer(2,1), buffer(2,2)) })
+expect_err("concat sr diff",   func() { return concat(buffer(2,1,44100), buffer(2,1,48000)) })
+
+# ── Informative type errors ───────────────────────────────────────────
+section("Type-error message quality")
+func msg_of(thunk) {
+    try { thunk() } catch (e) { return e.message }
+    return "<no error>"
+}
+
+# Each message should mention the operator AND the actual operand types.
+ok("scalar+string says both", find(msg_of(func() { return 1 + "x" }), "scalar") >= 0
+                              and find(msg_of(func() { return 1 + "x" }), "string") >= 0)
+ok("scalar+nil names types",  find(msg_of(func() { return 1 + nil }), "scalar") >= 0
+                              and find(msg_of(func() { return 1 + nil }), "nil") >= 0)
+ok("unary minus names type",  find(msg_of(func() { return -"hi" }), "string") >= 0)
+ok("vec mismatch shows sizes", find(msg_of(func() { return [1,2] + [1,2,3] }), "2 vs 3") >= 0)
+ok("buf shape shows shapes",   find(msg_of(func() { return buffer(2,2) + buffer(3,2) }), "2x2") >= 0)
 
 # ── try/finally ───────────────────────────────────────────────────────
 section("try/finally")
