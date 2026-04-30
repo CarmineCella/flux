@@ -1371,7 +1371,7 @@ struct Interpreter {
             const Closure& cl = fn.as_closure();
             if (args.size() != cl.params.size())
                 err(f, ln, (cl.name.empty() ? "<anonymous>" : cl.name)
-                    + " expects " + std::to_string(cl.params.size())
+                    + ": expected " + std::to_string(cl.params.size())
                     + " arg(s), got " + std::to_string(args.size()));
 
             std::string label = (cl.name.empty() ? std::string("<anonymous>") : cl.name)
@@ -1427,888 +1427,6 @@ struct Interpreter {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  register_builtins — host-callable native functions exposed to
-    //  the script. Sub-sections below organise them by concern.
-    //  Note: this section is placed before eval() in the source for
-    //  historical reasons; for understanding the language semantics,
-    //  read eval() (further down) first and refer back here on demand.
-    // ════════════════════════════════════════════════════════════════
-    void register_builtins() {
-        // ── polymorphic: len, reverse ─────────────────────────────────
-        reg("len", [](auto& a, int ln, auto& f) -> Value {
-            ck("len", a, 1, ln, f);
-            if (a[0].is_vec())    return Value((double)a[0].as_vec().size());
-            if (a[0].is_str())    return Value((double)a[0].as_str().size());
-            if (a[0].is_list())   return Value((double)a[0].as_list().size());
-            if (a[0].is_dict())   return Value((double)a[0].as_dict().size());
-            if (a[0].is_buffer()) return Value((double)a[0].as_buffer().n_frames);
-            err(f, ln, "len: unsupported type");
-        });
-
-        reg("reverse", [](auto& a, int ln, auto& f) -> Value {
-            ck("reverse", a, 1, ln, f);
-            if (a[0].is_str()) {
-                auto s = a[0].as_str();
-                std::reverse(s.begin(), s.end());
-                return Value(Str(s));
-            }
-            if (a[0].is_list()) {
-                List l = a[0].as_list();
-                std::reverse(l.begin(), l.end());
-                return Value(std::move(l));
-            }
-            if (a[0].is_vec()) {
-                auto& v = a[0].as_vec();
-                Vec r(v.size());
-                for (size_t i = 0; i < v.size(); ++i) r[i] = v[v.size() - 1 - i];
-                return Value(r);
-            }
-            if (a[0].is_buffer()) {
-                // Reverse frame order; samples within a frame keep their channel.
-                auto& b = a[0].as_buffer();
-                auto out = std::make_shared<Buffer>();
-                out->n_frames = b.n_frames;
-                out->n_channels = b.n_channels;
-                out->sample_rate = b.sample_rate;
-                out->data.resize(b.data.size());
-                for (size_t i = 0; i < b.n_frames; ++i)
-                    for (size_t c = 0; c < b.n_channels; ++c)
-                        out->data[i * b.n_channels + c] =
-                            b.data[(b.n_frames - 1 - i) * b.n_channels + c];
-                return Value(out);
-            }
-            err(f, ln, "reverse: unsupported type " + value_kind_name(a[0]));
-        });
-
-        reg("slice", [](auto& a, int ln, auto& f) -> Value {
-            ck("slice", a, 3, ln, f);
-            nv("slice", a[1], ln, f); nv("slice", a[2], ln, f);
-            int start = (int)a[1].scalar(), stop = (int)a[2].scalar();
-            if (a[0].is_vec()) {
-                auto& v = a[0].as_vec();
-                if (start < 0) start += (int)v.size();
-                if (stop  < 0) stop  += (int)v.size();
-                if (start < 0) start = 0;
-                if (stop > (int)v.size()) stop = (int)v.size();
-                int n = std::max(0, stop - start);
-                Vec r(n);
-                for (int i = 0; i < n; ++i) r[i] = v[start + i];
-                return Value(r);
-            }
-            if (a[0].is_list()) {
-                auto& l = a[0].as_list();
-                if (start < 0) start += (int)l.size();
-                if (stop  < 0) stop  += (int)l.size();
-                if (start < 0) start = 0;
-                if (stop > (int)l.size()) stop = (int)l.size();
-                if (start > stop) start = stop;
-                return Value(List(l.begin() + start, l.begin() + stop));
-            }
-            if (a[0].is_str()) {
-                auto& s = a[0].as_str();
-                if (start < 0) start += (int)s.size();
-                if (stop  < 0) stop  += (int)s.size();
-                if (start < 0) start = 0;
-                if (stop > (int)s.size()) stop = (int)s.size();
-                return Value(Str(s.substr(start, stop - start)));
-            }
-            if (a[0].is_buffer()) {
-                // Slice over frames; channels and sample rate are preserved.
-                // The new buffer is a copy — slicing does not alias the source
-                // (consistent with vec/list/string slice semantics).
-                auto& b = a[0].as_buffer();
-                int nf = (int)b.n_frames;
-                if (start < 0) start += nf;
-                if (stop  < 0) stop  += nf;
-                if (start < 0) start = 0;
-                if (stop > nf) stop = nf;
-                int n = std::max(0, stop - start);
-                auto out = std::make_shared<Buffer>();
-                out->n_frames = (size_t)n;
-                out->n_channels = b.n_channels;
-                out->sample_rate = b.sample_rate;
-                out->data.assign((size_t)n * b.n_channels, 0.0);
-                for (int i = 0; i < n; ++i)
-                    for (size_t c = 0; c < b.n_channels; ++c)
-                        out->data[i * b.n_channels + c] =
-                            b.data[(start + i) * b.n_channels + c];
-                return Value(out);
-            }
-            err(f, ln, "slice: unsupported type " + value_kind_name(a[0]));
-        });
-
-        reg("concat", [](auto& a, int ln, auto& f) -> Value {
-            ck("concat", a, 2, ln, f);
-            if (a[0].is_str() && a[1].is_str())
-                return Value(Str(a[0].as_str() + a[1].as_str()));
-            if (a[0].is_list() && a[1].is_list()) {
-                List l = a[0].as_list();
-                auto& r = a[1].as_list();
-                l.insert(l.end(), r.begin(), r.end());
-                return Value(std::move(l));
-            }
-            if (a[0].is_vec() && a[1].is_vec()) {
-                auto& va = a[0].as_vec();
-                auto& vb = a[1].as_vec();
-                Vec r(va.size() + vb.size());
-                for (size_t i = 0; i < va.size(); ++i) r[i] = va[i];
-                for (size_t i = 0; i < vb.size(); ++i) r[va.size() + i] = vb[i];
-                return Value(r);
-            }
-            if (a[0].is_dict() && a[1].is_dict()) {
-                auto d = std::make_shared<DictMap>(a[0].as_dict());
-                for (auto& kv : a[1].as_dict()) (*d)[kv.first] = kv.second;
-                return Value(d);
-            }
-            if (a[0].is_buffer() && a[1].is_buffer()) {
-                // Append second buffer's frames after first's. Channels and
-                // sample rates must match; otherwise the result would be
-                // ambiguous and silently wrong.
-                auto& ba = a[0].as_buffer();
-                auto& bb = a[1].as_buffer();
-                if (ba.n_channels != bb.n_channels)
-                    err(f, ln, "concat: buffer channel counts differ ("
-                             + std::to_string(ba.n_channels) + " vs "
-                             + std::to_string(bb.n_channels) + ")");
-                if (ba.sample_rate != bb.sample_rate)
-                    err(f, ln, "concat: buffer sample rates differ ("
-                             + Value::fmt(ba.sample_rate) + " vs "
-                             + Value::fmt(bb.sample_rate) + ")");
-                auto out = std::make_shared<Buffer>();
-                out->n_frames = ba.n_frames + bb.n_frames;
-                out->n_channels = ba.n_channels;
-                out->sample_rate = ba.sample_rate;
-                out->data.reserve(ba.data.size() + bb.data.size());
-                out->data.insert(out->data.end(), ba.data.begin(), ba.data.end());
-                out->data.insert(out->data.end(), bb.data.begin(), bb.data.end());
-                return Value(out);
-            }
-            err(f, ln, "concat: cannot concatenate "
-                     + value_kind_name(a[0]) + " and "
-                     + value_kind_name(a[1]));
-        });
-
-        // ── vec / buffer: reductions ──────────────────────────────────
-        // Buffers reduce over their flat sample array. For multi-channel
-        // buffers this means "sum/min/max/mean over all samples"; if you
-        // want a per-channel reduction you'll iterate frames yourself.
-        auto reduce_data = [](const Value& v, const char* op_for_err,
-                              double seed, auto step) -> double {
-            const double* p; size_t n;
-            if (v.is_vec())    { auto& x = v.as_vec();    p = &x[0];        n = x.size(); }
-            else /* buffer */  { auto& x = v.as_buffer(); p = x.data.data(); n = x.data.size(); }
-            (void)op_for_err;
-            double r = seed;
-            for (size_t i = 0; i < n; ++i) r = step(r, p[i], i);
-            return r;
-        };
-        reg("sum",  [reduce_data](auto& a, int ln, auto& f) -> Value {
-            ck("sum", a, 1, ln, f);
-            if (!a[0].is_vec() && !a[0].is_buffer())
-                err(f, ln, "sum: expected vec or buffer, got " + value_kind_name(a[0]));
-            return Value(reduce_data(a[0], "sum", 0.0,
-                [](double r, double x, size_t) { return r + x; }));
-        });
-        reg("mean", [](auto& a, int ln, auto& f) -> Value {
-            ck("mean", a, 1, ln, f);
-            if (a[0].is_vec()) { auto& v = a[0].as_vec(); return Value(v.sum() / (double)v.size()); }
-            if (a[0].is_buffer()) {
-                auto& b = a[0].as_buffer();
-                if (b.data.empty()) return Value(0.0);
-                double s = 0; for (double x : b.data) s += x;
-                return Value(s / (double)b.data.size());
-            }
-            err(f, ln, "mean: expected vec or buffer, got " + value_kind_name(a[0]));
-        });
-        reg("min",  [](auto& a, int ln, auto& f) -> Value {
-            ck("min", a, 1, ln, f);
-            if (a[0].is_vec()) return Value(a[0].as_vec().min());
-            if (a[0].is_buffer()) {
-                auto& b = a[0].as_buffer();
-                if (b.data.empty()) err(f, ln, "min: empty buffer");
-                double m = b.data[0]; for (double x : b.data) if (x < m) m = x;
-                return Value(m);
-            }
-            err(f, ln, "min: expected vec or buffer, got " + value_kind_name(a[0]));
-        });
-        reg("max",  [](auto& a, int ln, auto& f) -> Value {
-            ck("max", a, 1, ln, f);
-            if (a[0].is_vec()) return Value(a[0].as_vec().max());
-            if (a[0].is_buffer()) {
-                auto& b = a[0].as_buffer();
-                if (b.data.empty()) err(f, ln, "max: empty buffer");
-                double m = b.data[0]; for (double x : b.data) if (x > m) m = x;
-                return Value(m);
-            }
-            err(f, ln, "max: expected vec or buffer, got " + value_kind_name(a[0]));
-        });
-
-        // ── vec: element-wise math ────────────────────────────────────
-        auto m1 = [this](const char* nm, Vec(*op)(const Vec&)) {
-            reg(nm, [nm, op](auto& a, int ln, auto& f) -> Value {
-                ck(nm, a, 1, ln, f); nv(nm, a[0], ln, f);
-                return Value(op(a[0].as_vec()));
-            });
-        };
-        m1("sqrt", [](const Vec& v) -> Vec { return std::sqrt(v); });
-        m1("abs",  [](const Vec& v) -> Vec { return std::abs(v); });
-        m1("sin",  [](const Vec& v) -> Vec { return std::sin(v); });
-        m1("cos",  [](const Vec& v) -> Vec { return std::cos(v); });
-        m1("tan",  [](const Vec& v) -> Vec { return std::tan(v); });
-        m1("exp",  [](const Vec& v) -> Vec { return std::exp(v); });
-        m1("log",  [](const Vec& v) -> Vec { return std::log(v); });
-        m1("asin", [](const Vec& v) -> Vec { return std::asin(v); });
-        m1("acos", [](const Vec& v) -> Vec { return std::acos(v); });
-        m1("atan", [](const Vec& v) -> Vec { return std::atan(v); });
-
-        reg("floor", [](auto& a, int ln, auto& f) -> Value {
-            ck("floor", a, 1, ln, f); nv("floor", a[0], ln, f);
-            auto& v = a[0].as_vec(); Vec r(v.size());
-            for (size_t i = 0; i < v.size(); ++i) r[i] = std::floor(v[i]);
-            return Value(r);
-        });
-        reg("ceil", [](auto& a, int ln, auto& f) -> Value {
-            ck("ceil", a, 1, ln, f); nv("ceil", a[0], ln, f);
-            auto& v = a[0].as_vec(); Vec r(v.size());
-            for (size_t i = 0; i < v.size(); ++i) r[i] = std::ceil(v[i]);
-            return Value(r);
-        });
-        reg("round", [](auto& a, int ln, auto& f) -> Value {
-            ck("round", a, 1, ln, f); nv("round", a[0], ln, f);
-            auto& v = a[0].as_vec(); Vec r(v.size());
-            for (size_t i = 0; i < v.size(); ++i) r[i] = std::round(v[i]);
-            return Value(r);
-        });
-        reg("pow", [](auto& a, int ln, auto& f) -> Value {
-            ck("pow", a, 2, ln, f); nv("pow", a[0], ln, f); nv("pow", a[1], ln, f);
-            // Broadcast explicitly: std::pow on valarrays of mismatched
-            // sizes is undefined behavior in libstdc++.
-            Vec va = a[0].as_vec(), vb = a[1].as_vec();
-            if (va.size() == 1 && vb.size() > 1) { Vec t(vb.size()); t = va[0]; va = t; }
-            if (vb.size() == 1 && va.size() > 1) { Vec t(va.size()); t = vb[0]; vb = t; }
-            if (va.size() != vb.size())
-                err(f, ln, "pow: vector size mismatch (" + std::to_string(va.size()) +
-                           " vs " + std::to_string(vb.size()) + ")");
-            Vec r(va.size());
-            for (size_t i = 0; i < va.size(); ++i) r[i] = std::pow(va[i], vb[i]);
-            return Value(r);
-        });
-        reg("sort", [](auto& a, int ln, auto& f) -> Value {
-            ck("sort", a, 1, ln, f); nv("sort", a[0], ln, f);
-            auto v = a[0].as_vec();
-            std::sort(std::begin(v), std::end(v));
-            return Value(v);
-        });
-
-        // ── vec: constructors ─────────────────────────────────────────
-        reg("range", [](auto& a, int ln, auto& f) -> Value {
-            if (a.size() < 1 || a.size() > 3) err(f, ln, "range expects 1-3 args");
-            nv("range", a[0], ln, f);
-            double start = 0, stop, step = 1;
-            if (a.size() == 1) { stop = a[0].scalar(); }
-            else { start = a[0].scalar(); stop = a[1].scalar();
-                   if (a.size() == 3) { nv("range", a[2], ln, f); step = a[2].scalar(); } }
-            int n = std::max(0, (int)std::ceil((stop - start) / step));
-            Vec r(n);
-            for (int i = 0; i < n; ++i) r[i] = start + i * step;
-            return Value(r);
-        });
-        reg("zeros", [](auto& a, int ln, auto& f) -> Value {
-            ck("zeros", a, 1, ln, f); nv("zeros", a[0], ln, f);
-            return Value(Vec(0.0, (size_t)a[0].scalar()));
-        });
-        reg("ones", [](auto& a, int ln, auto& f) -> Value {
-            ck("ones", a, 1, ln, f); nv("ones", a[0], ln, f);
-            return Value(Vec(1.0, (size_t)a[0].scalar()));
-        });
-        reg("rand", [this](auto& a, int ln, auto& f) -> Value {
-            int n = 1;
-            if (!a.empty()) { nv("rand", a[0], ln, f); n = (int)a[0].scalar(); }
-            std::uniform_real_distribution<double> dist(0.0, 1.0);
-            Vec r(n);
-            for (int i = 0; i < n; ++i) r[i] = dist(rng);
-            return Value(r);
-        });
-        reg("seed", [this](auto& a, int ln, auto& f) -> Value {
-            ck("seed", a, 1, ln, f); nv("seed", a[0], ln, f);
-            rng.seed((uint64_t)a[0].scalar());
-            return Value(nullptr);
-        });
-
-        // ── list operations ───────────────────────────────────────────
-        reg("list", [](auto& a, int, auto&) -> Value {
-            return Value(List(a.begin(), a.end()));
-        });
-        // push: mutates the list in place and returns it (reference semantics).
-        reg("push", [](auto& a, int ln, auto& f) -> Value {
-            ck("push", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "push: expected list, got " + value_kind_name(a[0]));
-            a[0].as_list_mut().push_back(a[1]);
-            return a[0];
-        });
-        reg("pop", [](auto& a, int ln, auto& f) -> Value {
-            ck("pop", a, 1, ln, f);
-            if (!a[0].is_list()) err(f, ln, "pop: expected list, got " + value_kind_name(a[0]));
-            auto& l = a[0].as_list_mut();
-            if (l.empty()) err(f, ln, "pop: empty list");
-            Value v = std::move(l.back());
-            l.pop_back();
-            return v;
-        });
-        reg("insert", [](auto& a, int ln, auto& f) -> Value {
-            ck("insert", a, 3, ln, f);
-            if (!a[0].is_list()) err(f, ln, "insert: expected list, got " + value_kind_name(a[0]));
-            nv("insert", a[1], ln, f);
-            auto& l = a[0].as_list_mut();
-            int i = (int)a[1].scalar();
-            if (i < 0) i += (int)l.size();
-            if (i < 0 || i > (int)l.size()) err(f, ln, "insert: index out of range");
-            l.insert(l.begin() + i, a[2]);
-            return a[0];
-        });
-        // remove: polymorphic — list by index, dict by key.
-        reg("remove", [](auto& a, int ln, auto& f) -> Value {
-            ck("remove", a, 2, ln, f);
-            if (a[0].is_list()) {
-                nv("remove", a[1], ln, f);
-                auto& l = a[0].as_list_mut();
-                int i = (int)a[1].scalar();
-                if (i < 0) i += (int)l.size();
-                if (i < 0 || i >= (int)l.size()) err(f, ln, "remove: index out of range");
-                Value v = std::move(l[i]);
-                l.erase(l.begin() + i);
-                return v;
-            }
-            if (a[0].is_dict()) {
-                ns("remove", a[1], ln, f);
-                auto& d = a[0].as_dict_mut();
-                auto it = d.find(a[1].as_str());
-                if (it == d.end()) return Value(nullptr);
-                Value v = std::move(it->second);
-                d.erase(it);
-                return v;
-            }
-            err(f, ln, "remove expects list or dict");
-        });
-        reg("copy", [](auto& a, int ln, auto& f) -> Value {
-            ck("copy", a, 1, ln, f);
-            if (a[0].is_list())   return Value(List(a[0].as_list()));
-            if (a[0].is_vec())    return Value(Vec(a[0].as_vec()));
-            if (a[0].is_str())    return Value(Str(a[0].as_str()));
-            if (a[0].is_dict())   return Value(std::make_shared<DictMap>(a[0].as_dict()));
-            if (a[0].is_buffer()) return Value(std::make_shared<Buffer>(a[0].as_buffer()));
-            return a[0];
-        });
-
-        // ── dict operations ───────────────────────────────────────────
-        // dict()                — empty dict
-        // dict(list-of-pairs)   — build from list of [key, value] 2-element lists
-        reg("dict", [](auto& a, int ln, auto& f) -> Value {
-            auto d = std::make_shared<DictMap>();
-            if (a.empty()) return Value(d);
-            ck("dict", a, 1, ln, f);
-            if (!a[0].is_list()) err(f, ln, "dict expects a list of [key,value] pairs");
-            for (auto& el : a[0].as_list()) {
-                if (!el.is_list() || el.as_list().size() != 2)
-                    err(f, ln, "dict: each element must be [key,value]");
-                auto& pair = el.as_list();
-                if (!pair[0].is_str()) err(f, ln, "dict: keys must be strings");
-                (*d)[pair[0].as_str()] = pair[1];
-            }
-            return Value(d);
-        });
-        reg("keys", [](auto& a, int ln, auto& f) -> Value {
-            ck("keys", a, 1, ln, f); nd("keys", a[0], ln, f);
-            std::vector<std::string> ks;
-            for (auto& kv : a[0].as_dict()) ks.push_back(kv.first);
-            std::sort(ks.begin(), ks.end());
-            List out;
-            out.reserve(ks.size());
-            for (auto& k : ks) out.push_back(Value(Str(k)));
-            return Value(std::move(out));
-        });
-        reg("values", [](auto& a, int ln, auto& f) -> Value {
-            ck("values", a, 1, ln, f); nd("values", a[0], ln, f);
-            auto& d = a[0].as_dict();
-            std::vector<std::string> ks;
-            for (auto& kv : d) ks.push_back(kv.first);
-            std::sort(ks.begin(), ks.end());
-            List out;
-            out.reserve(ks.size());
-            for (auto& k : ks) out.push_back(d.at(k));
-            return Value(std::move(out));
-        });
-        reg("has", [](auto& a, int ln, auto& f) -> Value {
-            ck("has", a, 2, ln, f);
-            if (!a[0].is_dict()) err(f, ln, "has: expected dict, got " + value_kind_name(a[0]));
-            ns("has", a[1], ln, f);
-            return Value(a[0].as_dict().count(a[1].as_str()) ? 1.0 : 0.0);
-        });
-        reg("get", [](auto& a, int ln, auto& f) -> Value {
-            if (a.size() != 2 && a.size() != 3) err(f, ln, "get expects 2 or 3 args");
-            if (!a[0].is_dict()) err(f, ln, "get: expected dict, got " + value_kind_name(a[0]));
-            ns("get", a[1], ln, f);
-            auto& d = a[0].as_dict();
-            auto it = d.find(a[1].as_str());
-            if (it != d.end()) return it->second;
-            return a.size() == 3 ? a[2] : Value(nullptr);
-        });
-
-        // ── higher-order: map, filter, reduce, each, apply ────────────
-        reg("map", [this](auto& a, int ln, auto& f) -> Value {
-            ck("map", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "map: expected list, got " + value_kind_name(a[0]));
-            nf("map", a[1], ln, f);
-            List out;
-            for (auto& x : a[0].as_list()) out.push_back(call_value(a[1], {x}, ln, f));
-            return Value(std::move(out));
-        });
-        reg("filter", [this](auto& a, int ln, auto& f) -> Value {
-            ck("filter", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "filter: expected list, got " + value_kind_name(a[0]));
-            nf("filter", a[1], ln, f);
-            List out;
-            for (auto& x : a[0].as_list())
-                if (call_value(a[1], {x}, ln, f).truthy()) out.push_back(x);
-            return Value(std::move(out));
-        });
-        reg("reduce", [this](auto& a, int ln, auto& f) -> Value {
-            ck("reduce", a, 3, ln, f);
-            if (!a[0].is_list()) err(f, ln, "reduce: expected list, got " + value_kind_name(a[0]));
-            nf("reduce", a[1], ln, f);
-            Value acc = a[2];
-            for (auto& x : a[0].as_list()) acc = call_value(a[1], {acc, x}, ln, f);
-            return acc;
-        });
-        reg("each", [this](auto& a, int ln, auto& f) -> Value {
-            ck("each", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "each: expected list, got " + value_kind_name(a[0]));
-            nf("each", a[1], ln, f);
-            for (auto& x : a[0].as_list()) call_value(a[1], {x}, ln, f);
-            return Value(nullptr);
-        });
-        reg("apply", [this](auto& a, int ln, auto& f) -> Value {
-            ck("apply", a, 2, ln, f);
-            nf("apply", a[0], ln, f);
-            if (!a[1].is_list()) err(f, ln, "apply expects list of arguments");
-            std::vector<Value> args(a[1].as_list().begin(), a[1].as_list().end());
-            return call_value(a[0], args, ln, f);
-        });
-
-        // ── string operations ─────────────────────────────────────────
-        reg("upper", [](auto& a, int ln, auto& f) -> Value {
-            ck("upper", a, 1, ln, f); ns("upper", a[0], ln, f);
-            auto s = a[0].as_str();
-            for (auto& c : s) c = std::toupper((unsigned char)c);
-            return Value(Str(s));
-        });
-        reg("lower", [](auto& a, int ln, auto& f) -> Value {
-            ck("lower", a, 1, ln, f); ns("lower", a[0], ln, f);
-            auto s = a[0].as_str();
-            for (auto& c : s) c = std::tolower((unsigned char)c);
-            return Value(Str(s));
-        });
-        reg("trim", [](auto& a, int ln, auto& f) -> Value {
-            ck("trim", a, 1, ln, f); ns("trim", a[0], ln, f);
-            auto s = a[0].as_str();
-            auto l = s.find_first_not_of(" \t\n\r");
-            if (l == std::string::npos) return Value(Str(""));
-            return Value(Str(s.substr(l, s.find_last_not_of(" \t\n\r") - l + 1)));
-        });
-        reg("split", [](auto& a, int ln, auto& f) -> Value {
-            ck("split", a, 2, ln, f); ns("split", a[0], ln, f); ns("split", a[1], ln, f);
-            List parts;
-            auto& s = a[0].as_str();
-            auto& d = a[1].as_str();
-            size_t st = 0, p;
-            while ((p = s.find(d, st)) != std::string::npos) {
-                parts.push_back(Value(Str(s.substr(st, p - st))));
-                st = p + d.size();
-            }
-            parts.push_back(Value(Str(s.substr(st))));
-            return Value(std::move(parts));
-        });
-        reg("join", [](auto& a, int ln, auto& f) -> Value {
-            ck("join", a, 2, ln, f);
-            if (!a[0].is_list()) err(f, ln, "join: expected list, got " + value_kind_name(a[0]));
-            ns("join", a[1], ln, f);
-            std::string r;
-            auto& l = a[0].as_list();
-            auto& sep = a[1].as_str();
-            for (size_t i = 0; i < l.size(); ++i) {
-                if (i) r += sep;
-                r += l[i].repr();
-            }
-            return Value(Str(r));
-        });
-        reg("substr", [](auto& a, int ln, auto& f) -> Value {
-            ck("substr", a, 3, ln, f); ns("substr", a[0], ln, f);
-            nv("substr", a[1], ln, f); nv("substr", a[2], ln, f);
-            return Value(Str(a[0].as_str().substr(
-                (size_t)a[1].scalar(), (size_t)a[2].scalar())));
-        });
-        reg("find", [](auto& a, int ln, auto& f) -> Value {
-            ck("find", a, 2, ln, f); ns("find", a[0], ln, f); ns("find", a[1], ln, f);
-            auto p = a[0].as_str().find(a[1].as_str());
-            return Value(p == std::string::npos ? -1.0 : (double)p);
-        });
-        reg("replace", [](auto& a, int ln, auto& f) -> Value {
-            ck("replace", a, 3, ln, f);
-            ns("replace", a[0], ln, f); ns("replace", a[1], ln, f); ns("replace", a[2], ln, f);
-            auto s = a[0].as_str();
-            auto& from = a[1].as_str();
-            auto& to = a[2].as_str();
-            if (from.empty()) return Value(Str(s));
-            size_t p = 0;
-            while ((p = s.find(from, p)) != std::string::npos) {
-                s.replace(p, from.size(), to);
-                p += to.size();
-            }
-            return Value(Str(s));
-        });
-
-        // format("hello {}, you have {} new", name, count)
-        // {{ and }} are escaped braces.
-        reg("format", [](auto& a, int ln, auto& f) -> Value {
-            if (a.empty()) err(f, ln, "format expects at least 1 arg");
-            ns("format", a[0], ln, f);
-            auto& fmt = a[0].as_str();
-            std::string out;
-            size_t arg_idx = 1;
-            for (size_t i = 0; i < fmt.size(); ++i) {
-                if (i + 1 < fmt.size() && fmt[i] == '{' && fmt[i+1] == '{') {
-                    out += '{'; ++i; continue;
-                }
-                if (i + 1 < fmt.size() && fmt[i] == '}' && fmt[i+1] == '}') {
-                    out += '}'; ++i; continue;
-                }
-                if (i + 1 < fmt.size() && fmt[i] == '{' && fmt[i+1] == '}') {
-                    if (arg_idx < a.size()) out += a[arg_idx++].repr();
-                    else out += "{}";
-                    ++i; continue;
-                }
-                out += fmt[i];
-            }
-            return Value(Str(out));
-        });
-
-        // out(args...) — write reprs to stdout with no separator and no newline.
-        reg("out", [](auto& a, int, auto&) -> Value {
-            for (auto& v : a) std::cout << v.repr();
-            std::cout.flush();
-            return Value(nullptr);
-        });
-
-        // ── regex ─────────────────────────────────────────────────────
-        reg("match", [](auto& a, int ln, auto& f) -> Value {
-            ck("match", a, 2, ln, f); ns("match", a[0], ln, f); ns("match", a[1], ln, f);
-            try {
-                std::regex re(a[1].as_str());
-                std::smatch m;
-                if (std::regex_search(a[0].as_str(), m, re)) {
-                    List l;
-                    for (auto& g : m) l.push_back(Value(Str(g.str())));
-                    return Value(std::move(l));
-                }
-                return Value(nullptr);
-            } catch (std::regex_error&) {
-                err(f, ln, "invalid regex: " + a[1].as_str());
-            }
-        });
-
-        // ── type / conversion ─────────────────────────────────────────
-        reg("type", [](auto& a, int ln, auto& f) -> Value {
-            ck("type", a, 1, ln, f);
-            if (a[0].is_nil()) return Value(Str("nil"));
-            if (a[0].is_vec() && a[0].as_vec().size() == 1) return Value(Str("scalar"));
-            if (a[0].is_vec())    return Value(Str("vec"));
-            if (a[0].is_str())    return Value(Str("string"));
-            if (a[0].is_list())   return Value(Str("list"));
-            if (a[0].is_dict())   return Value(Str("dict"));
-            if (a[0].is_buffer()) return Value(Str("buffer"));
-            if (a[0].is_opaque()) return Value(Str("opaque"));
-            return Value(Str("func"));
-        });
-        reg("str", [](auto& a, int ln, auto& f) -> Value {
-            ck("str", a, 1, ln, f);
-            return Value(Str(a[0].repr()));
-        });
-        reg("num", [](auto& a, int ln, auto& f) -> Value {
-            ck("num", a, 1, ln, f); ns("num", a[0], ln, f);
-            try { return Value(std::stod(a[0].as_str())); }
-            catch (...) { err(f, ln, "num: cannot parse '" + a[0].as_str() + "'"); }
-        });
-        reg("vec", [](auto& a, int ln, auto& f) -> Value {
-            ck("vec", a, 1, ln, f);
-            if (a[0].is_list()) {
-                auto& l = a[0].as_list();
-                Vec v(l.size());
-                for (size_t i = 0; i < l.size(); ++i) {
-                    if (!l[i].is_vec()) err(f, ln, "vec: element not numeric");
-                    v[i] = l[i].scalar();
-                }
-                return Value(v);
-            }
-            err(f, ln, "vec expects list");
-        });
-
-        // ── I/O (relative paths resolved from cwd, not from source file) ─
-        reg("read", [](auto& a, int ln, auto& f) -> Value {
-            ck("read", a, 1, ln, f); ns("read", a[0], ln, f);
-            auto p = normalize_path(a[0].as_str(), "");
-            std::ifstream fs(p);
-            if (!fs) err(f, ln, "cannot open " + p.string());
-            std::ostringstream ss; ss << fs.rdbuf();
-            return Value(Str(ss.str()));
-        });
-        reg("write", [](auto& a, int ln, auto& f) -> Value {
-            ck("write", a, 2, ln, f); ns("write", a[0], ln, f);
-            auto p = normalize_path(a[0].as_str(), "");
-            std::ofstream fs(p);
-            if (!fs) err(f, ln, "cannot open " + p.string());
-            fs << a[1].repr();
-            return Value(nullptr);
-        });
-        reg("append", [](auto& a, int ln, auto& f) -> Value {
-            ck("append", a, 2, ln, f); ns("append", a[0], ln, f);
-            auto p = normalize_path(a[0].as_str(), "");
-            std::ofstream fs(p, std::ios::app);
-            if (!fs) err(f, ln, "cannot open " + p.string());
-            fs << a[1].repr();
-            return Value(nullptr);
-        });
-
-        // ── system ────────────────────────────────────────────────────
-        reg("exec", [](auto& a, int ln, auto& f) -> Value {
-            ck("exec", a, 1, ln, f); ns("exec", a[0], ln, f);
-            std::array<char, 256> buf;
-            std::string out;
-            FILE* p = popen(a[0].as_str().c_str(), "r");
-            if (!p) err(f, ln, "exec failed");
-            while (fgets(buf.data(), buf.size(), p)) out += buf.data();
-            pclose(p);
-            return Value(Str(out));
-        });
-        reg("exit", [](auto& a, int ln, auto& f) -> Value {
-            int code = 0;
-            if (!a.empty()) { nv("exit", a[0], ln, f); code = (int)a[0].scalar(); }
-            std::exit(code);
-            return Value(nullptr);
-        });
-        reg("env", [](auto& a, int ln, auto& f) -> Value {
-            ck("env", a, 1, ln, f); ns("env", a[0], ln, f);
-            auto* v = std::getenv(a[0].as_str().c_str());
-            return v ? Value(Str(v)) : Value(nullptr);
-        });
-        reg("clock", [](auto& a, int, auto&) -> Value {
-            (void)a;
-            auto t = std::chrono::high_resolution_clock::now();
-            return Value((double)std::chrono::duration_cast<std::chrono::microseconds>(
-                t.time_since_epoch()).count() / 1e6);
-        });
-        reg("sleep", [](auto& a, int ln, auto& f) -> Value {
-            ck("sleep", a, 1, ln, f); nv("sleep", a[0], ln, f);
-            double s = a[0].scalar();
-            if (s < 0) s = 0;
-            std::this_thread::sleep_for(std::chrono::duration<double>(s));
-            return Value(nullptr);
-        });
-        reg("error", [](auto& a, int ln, auto& f) -> Value {
-            ck("error", a, 1, ln, f);
-            err(f, ln, a[0].repr());
-        });
-
-        // ── character codes ───────────────────────────────────────────
-        reg("char", [](auto& a, int ln, auto& f) -> Value {
-            ck("char", a, 1, ln, f); nv("char", a[0], ln, f);
-            int code = (int)a[0].scalar();
-            if (code < 0 || code > 255) err(f, ln, "char: code must be 0-255");
-            return Value(Str(1, (char)code));
-        });
-        reg("asc", [](auto& a, int ln, auto& f) -> Value {
-            ck("asc", a, 1, ln, f); ns("asc", a[0], ln, f);
-            if (a[0].as_str().empty()) err(f, ln, "asc: empty string");
-            return Value((double)(unsigned char)a[0].as_str()[0]);
-        });
-
-        // ── shuffle: returns a shuffled copy ──────────────────────────
-        reg("shuffle", [this](auto& a, int ln, auto& f) -> Value {
-            ck("shuffle", a, 1, ln, f);
-            if (a[0].is_list()) {
-                List l = a[0].as_list();
-                for (size_t i = l.size(); i > 1; --i) {
-                    std::uniform_int_distribution<size_t> dist(0, i - 1);
-                    std::swap(l[i - 1], l[dist(rng)]);
-                }
-                return Value(std::move(l));
-            }
-            if (a[0].is_vec()) {
-                Vec v = a[0].as_vec();
-                for (size_t i = v.size(); i > 1; --i) {
-                    std::uniform_int_distribution<size_t> dist(0, i - 1);
-                    std::swap(v[i - 1], v[dist(rng)]);
-                }
-                return Value(v);
-            }
-            err(f, ln, "shuffle expects list or vec");
-        });
-
-        // ── stdin ─────────────────────────────────────────────────────
-        reg("input", [](auto& a, int ln, auto& f) -> Value {
-            if (a.size() > 1) err(f, ln, "input expects 0 or 1 args");
-            if (!a.empty()) {
-                ns("input", a[0], ln, f);
-                std::cout << a[0].as_str() << std::flush;
-            }
-            std::string line;
-            if (!std::getline(std::cin, line)) return Value(nullptr);
-            return Value(Str(line));
-        });
-
-        // ── buffer (audio) ────────────────────────────────────────────
-        // buffer(frames)              — mono, default sample rate
-        // buffer(frames, channels)    — multi-channel, default sample rate
-        // buffer(frames, channels, sr)
-        reg_doc("buffer",
-                "buffer(frames [, channels [, sample_rate]]) — allocate an audio buffer (interleaved, doubles).",
-                [](auto& a, int ln, auto& f) -> Value {
-            if (a.size() < 1 || a.size() > 3)
-                err(f, ln, "buffer expects 1-3 args (frames [, channels [, sample_rate]])");
-            for (auto& x : a) nv("buffer", x, ln, f);
-            double df = a[0].scalar();
-            if (df < 0) err(f, ln, "buffer: frames must be non-negative (got "
-                                  + Value::fmt(df) + ")");
-            auto b = std::make_shared<Buffer>();
-            b->n_frames = (size_t)df;
-            if (a.size() >= 2) {
-                double dc = a[1].scalar();
-                if (dc < 1) err(f, ln, "buffer: channels must be >= 1 (got "
-                                      + Value::fmt(dc) + ")");
-                b->n_channels = (size_t)dc;
-            } else {
-                b->n_channels = 1;
-            }
-            if (a.size() >= 3) {
-                double sr = a[2].scalar();
-                if (sr <= 0) err(f, ln, "buffer: sample_rate must be positive (got "
-                                       + Value::fmt(sr) + ")");
-                b->sample_rate = sr;
-            } else {
-                b->sample_rate = 44100.0;
-            }
-            b->data.assign(b->n_frames * b->n_channels, 0.0);
-            return Value(b);
-        });
-        reg_doc("frames", "frames(buffer) — number of frames.",
-                [](auto& a, int ln, auto& f) -> Value {
-            ck("frames", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "frames: expected buffer, got " + value_kind_name(a[0]));
-            return Value((double)a[0].as_buffer().n_frames);
-        });
-        reg_doc("channels", "channels(buffer) — number of channels.",
-                [](auto& a, int ln, auto& f) -> Value {
-            ck("channels", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "channels: expected buffer, got " + value_kind_name(a[0]));
-            return Value((double)a[0].as_buffer().n_channels);
-        });
-        reg_doc("sample_rate", "sample_rate(buffer) — sample rate in Hz.",
-                [](auto& a, int ln, auto& f) -> Value {
-            ck("sample_rate", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "sample_rate: expected buffer, got " + value_kind_name(a[0]));
-            return Value(a[0].as_buffer().sample_rate);
-        });
-        // Convert a mono buffer to a Vec (for arithmetic / DSP in flux).
-        reg_doc("buffer_to_vec",
-                "buffer_to_vec(buffer) — return Vec of all samples (interleaved if multi-channel).",
-                [](auto& a, int ln, auto& f) -> Value {
-            ck("buffer_to_vec", a, 1, ln, f);
-            if (!a[0].is_buffer()) err(f, ln, "buffer_to_vec: expected buffer, got " + value_kind_name(a[0]));
-            auto& b = a[0].as_buffer();
-            Vec v(b.data.size());
-            for (size_t i = 0; i < b.data.size(); ++i) v[i] = b.data[i];
-            return Value(v);
-        });
-        // Build a mono buffer from a Vec.
-        reg_doc("vec_to_buffer",
-                "vec_to_buffer(vec [, sample_rate]) — build a mono buffer from a Vec.",
-                [](auto& a, int ln, auto& f) -> Value {
-            if (a.size() < 1 || a.size() > 2) err(f, ln, "vec_to_buffer expects 1 or 2 args");
-            if (!a[0].is_vec()) err(f, ln, "vec_to_buffer: expected vec, got " + value_kind_name(a[0]));
-            auto b = std::make_shared<Buffer>();
-            auto& v = a[0].as_vec();
-            b->n_frames = v.size();
-            b->n_channels = 1;
-            b->sample_rate = a.size() == 2 ? (nv("vec_to_buffer", a[1], ln, f), a[1].scalar())
-                                           : 44100.0;
-            b->data.assign(v.size(), 0.0);
-            for (size_t i = 0; i < v.size(); ++i) b->data[i] = v[i];
-            return Value(b);
-        });
-
-        // ── opaque ────────────────────────────────────────────────────
-        // No constructor from Flux: opaques originate in C++ host code.
-        // Flux can only inspect the type tag and pass them around.
-        reg_doc("opaque_type",
-                "opaque_type(opaque) — return the type tag string of an opaque value.",
-                [](auto& a, int ln, auto& f) -> Value {
-            ck("opaque_type", a, 1, ln, f);
-            if (!a[0].is_opaque()) err(f, ln, "opaque_type: expected opaque, got " + value_kind_name(a[0]));
-            return Value(Str(a[0].as_opaque().type_tag));
-        });
-
-        // ── help & introspection ──────────────────────────────────────
-        reg_doc("help",
-                "help(fn|name) — return docstring for a closure or named native.",
-                [this](auto& a, int ln, auto& f) -> Value {
-            ck("help", a, 1, ln, f);
-            if (a[0].is_closure()) {
-                auto& c = a[0].as_closure();
-                if (c.doc.empty() && !c.name.empty()) {
-                    // Try the native_docs registry by closure name as a fallback.
-                    auto it = native_docs.find(c.name);
-                    if (it != native_docs.end()) return Value(Str(it->second));
-                }
-                return Value(Str(c.doc.empty() ? "<no documentation>" : c.doc));
-            }
-            if (a[0].is_native()) {
-                return Value(Str("<native function — call help with its name as a string>"));
-            }
-            if (a[0].is_str()) {
-                auto& name = a[0].as_str();
-                auto it = native_docs.find(name);
-                if (it != native_docs.end()) return Value(Str(it->second));
-                // Look the name up in the global env in case it's a closure.
-                auto* v = global->find(name);
-                if (v && v->is_closure()) {
-                    auto& c = v->as_closure();
-                    return Value(Str(c.doc.empty() ? "<no documentation>" : c.doc));
-                }
-                return Value(Str("<no documentation for: " + name + ">"));
-            }
-            err(f, ln, "help expects a function or its name as a string");
-        });
-
-        // bench(thunk) — call thunk() and return the wall-clock seconds it took.
-        reg_doc("bench",
-                "bench(thunk) — call thunk() and return elapsed wall-clock seconds.",
-                [this](auto& a, int ln, auto& f) -> Value {
-            ck("bench", a, 1, ln, f); nf("bench", a[0], ln, f);
-            auto t0 = std::chrono::high_resolution_clock::now();
-            call_value(a[0], {}, ln, f);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            return Value(std::chrono::duration<double>(t1 - t0).count());
-        });
-
-        // ── constants ─────────────────────────────────────────────────
-        global->def("pi",    Value(3.14159265358979323846));
-        global->def("e",     Value(2.71828182845904523536));
-        global->def("inf",   Value(std::numeric_limits<double>::infinity()));
-        global->def("nil",   Value(nullptr));
-        global->def("true",  Value(1.0));
-        global->def("false", Value(0.0));
-        global->def("flux_version", Value(Str(FLUX_VERSION)));
-    }
 
     // ── broadcast binary op ───────────────────────────────────────────
     // Apply a numeric binary op to two flat arrays of doubles into r (size n).
@@ -3055,6 +2173,895 @@ struct Interpreter {
         std::string canon = fs::weakly_canonical(fs::path(fname)).string();
         loaded_files.insert(canon);
         run_file(canon, global);
+    }
+
+
+    // ════════════════════════════════════════════════════════════════
+    //  register_builtins — host-callable native functions exposed to
+    //  the script. Placed last in the struct so the language core
+    //  (Value, Env, eval, vec_binop, call_value) reads top-to-bottom
+    //  before the leaves. Sub-sections below organise builtins by
+    //  concern: polymorphic, vec/buffer numerics, lists, dicts,
+    //  higher-order, strings, regex, type conversion, I/O, system,
+    //  buffer audio, opaque, help & introspection, constants.
+    // ════════════════════════════════════════════════════════════════
+    void register_builtins() {
+        // ── polymorphic: len, reverse ─────────────────────────────────
+        reg("len", [](auto& a, int ln, auto& f) -> Value {
+            ck("len", a, 1, ln, f);
+            if (a[0].is_vec())    return Value((double)a[0].as_vec().size());
+            if (a[0].is_str())    return Value((double)a[0].as_str().size());
+            if (a[0].is_list())   return Value((double)a[0].as_list().size());
+            if (a[0].is_dict())   return Value((double)a[0].as_dict().size());
+            if (a[0].is_buffer()) return Value((double)a[0].as_buffer().n_frames);
+            err(f, ln, "len: unsupported type");
+        });
+
+        reg("reverse", [](auto& a, int ln, auto& f) -> Value {
+            ck("reverse", a, 1, ln, f);
+            if (a[0].is_str()) {
+                auto s = a[0].as_str();
+                std::reverse(s.begin(), s.end());
+                return Value(Str(s));
+            }
+            if (a[0].is_list()) {
+                List l = a[0].as_list();
+                std::reverse(l.begin(), l.end());
+                return Value(std::move(l));
+            }
+            if (a[0].is_vec()) {
+                auto& v = a[0].as_vec();
+                Vec r(v.size());
+                for (size_t i = 0; i < v.size(); ++i) r[i] = v[v.size() - 1 - i];
+                return Value(r);
+            }
+            if (a[0].is_buffer()) {
+                // Reverse frame order; samples within a frame keep their channel.
+                auto& b = a[0].as_buffer();
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = b.n_frames;
+                out->n_channels = b.n_channels;
+                out->sample_rate = b.sample_rate;
+                out->data.resize(b.data.size());
+                for (size_t i = 0; i < b.n_frames; ++i)
+                    for (size_t c = 0; c < b.n_channels; ++c)
+                        out->data[i * b.n_channels + c] =
+                            b.data[(b.n_frames - 1 - i) * b.n_channels + c];
+                return Value(out);
+            }
+            err(f, ln, "reverse: unsupported type " + value_kind_name(a[0]));
+        });
+
+        reg("slice", [](auto& a, int ln, auto& f) -> Value {
+            ck("slice", a, 3, ln, f);
+            nv("slice", a[1], ln, f); nv("slice", a[2], ln, f);
+            int start = (int)a[1].scalar(), stop = (int)a[2].scalar();
+            if (a[0].is_vec()) {
+                auto& v = a[0].as_vec();
+                if (start < 0) start += (int)v.size();
+                if (stop  < 0) stop  += (int)v.size();
+                if (start < 0) start = 0;
+                if (stop > (int)v.size()) stop = (int)v.size();
+                int n = std::max(0, stop - start);
+                Vec r(n);
+                for (int i = 0; i < n; ++i) r[i] = v[start + i];
+                return Value(r);
+            }
+            if (a[0].is_list()) {
+                auto& l = a[0].as_list();
+                if (start < 0) start += (int)l.size();
+                if (stop  < 0) stop  += (int)l.size();
+                if (start < 0) start = 0;
+                if (stop > (int)l.size()) stop = (int)l.size();
+                if (start > stop) start = stop;
+                return Value(List(l.begin() + start, l.begin() + stop));
+            }
+            if (a[0].is_str()) {
+                auto& s = a[0].as_str();
+                if (start < 0) start += (int)s.size();
+                if (stop  < 0) stop  += (int)s.size();
+                if (start < 0) start = 0;
+                if (stop > (int)s.size()) stop = (int)s.size();
+                return Value(Str(s.substr(start, stop - start)));
+            }
+            if (a[0].is_buffer()) {
+                // Slice over frames; channels and sample rate are preserved.
+                // The new buffer is a copy — slicing does not alias the source
+                // (consistent with vec/list/string slice semantics).
+                auto& b = a[0].as_buffer();
+                int nf = (int)b.n_frames;
+                if (start < 0) start += nf;
+                if (stop  < 0) stop  += nf;
+                if (start < 0) start = 0;
+                if (stop > nf) stop = nf;
+                int n = std::max(0, stop - start);
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = (size_t)n;
+                out->n_channels = b.n_channels;
+                out->sample_rate = b.sample_rate;
+                out->data.assign((size_t)n * b.n_channels, 0.0);
+                for (int i = 0; i < n; ++i)
+                    for (size_t c = 0; c < b.n_channels; ++c)
+                        out->data[i * b.n_channels + c] =
+                            b.data[(start + i) * b.n_channels + c];
+                return Value(out);
+            }
+            err(f, ln, "slice: unsupported type " + value_kind_name(a[0]));
+        });
+
+        reg("concat", [](auto& a, int ln, auto& f) -> Value {
+            ck("concat", a, 2, ln, f);
+            if (a[0].is_str() && a[1].is_str())
+                return Value(Str(a[0].as_str() + a[1].as_str()));
+            if (a[0].is_list() && a[1].is_list()) {
+                List l = a[0].as_list();
+                auto& r = a[1].as_list();
+                l.insert(l.end(), r.begin(), r.end());
+                return Value(std::move(l));
+            }
+            if (a[0].is_vec() && a[1].is_vec()) {
+                auto& va = a[0].as_vec();
+                auto& vb = a[1].as_vec();
+                Vec r(va.size() + vb.size());
+                for (size_t i = 0; i < va.size(); ++i) r[i] = va[i];
+                for (size_t i = 0; i < vb.size(); ++i) r[va.size() + i] = vb[i];
+                return Value(r);
+            }
+            if (a[0].is_dict() && a[1].is_dict()) {
+                auto d = std::make_shared<DictMap>(a[0].as_dict());
+                for (auto& kv : a[1].as_dict()) (*d)[kv.first] = kv.second;
+                return Value(d);
+            }
+            if (a[0].is_buffer() && a[1].is_buffer()) {
+                // Append second buffer's frames after first's. Channels and
+                // sample rates must match; otherwise the result would be
+                // ambiguous and silently wrong.
+                auto& ba = a[0].as_buffer();
+                auto& bb = a[1].as_buffer();
+                if (ba.n_channels != bb.n_channels)
+                    err(f, ln, "concat: buffer channel counts differ ("
+                             + std::to_string(ba.n_channels) + " vs "
+                             + std::to_string(bb.n_channels) + ")");
+                if (ba.sample_rate != bb.sample_rate)
+                    err(f, ln, "concat: buffer sample rates differ ("
+                             + Value::fmt(ba.sample_rate) + " vs "
+                             + Value::fmt(bb.sample_rate) + ")");
+                auto out = std::make_shared<Buffer>();
+                out->n_frames = ba.n_frames + bb.n_frames;
+                out->n_channels = ba.n_channels;
+                out->sample_rate = ba.sample_rate;
+                out->data.reserve(ba.data.size() + bb.data.size());
+                out->data.insert(out->data.end(), ba.data.begin(), ba.data.end());
+                out->data.insert(out->data.end(), bb.data.begin(), bb.data.end());
+                return Value(out);
+            }
+            err(f, ln, "concat: cannot concatenate "
+                     + value_kind_name(a[0]) + " and "
+                     + value_kind_name(a[1]));
+        });
+
+        // ── vec / buffer: reductions ──────────────────────────────────
+        // Buffers reduce over their flat sample array. For multi-channel
+        // buffers this means "sum/min/max/mean over all samples"; if you
+        // want a per-channel reduction you'll iterate frames yourself.
+        auto reduce_data = [](const Value& v, const char* op_for_err,
+                              double seed, auto step) -> double {
+            const double* p; size_t n;
+            if (v.is_vec())    { auto& x = v.as_vec();    p = &x[0];        n = x.size(); }
+            else /* buffer */  { auto& x = v.as_buffer(); p = x.data.data(); n = x.data.size(); }
+            (void)op_for_err;
+            double r = seed;
+            for (size_t i = 0; i < n; ++i) r = step(r, p[i], i);
+            return r;
+        };
+        reg("sum",  [reduce_data](auto& a, int ln, auto& f) -> Value {
+            ck("sum", a, 1, ln, f);
+            if (!a[0].is_vec() && !a[0].is_buffer())
+                err(f, ln, "sum: expected vec or buffer, got " + value_kind_name(a[0]));
+            return Value(reduce_data(a[0], "sum", 0.0,
+                [](double r, double x, size_t) { return r + x; }));
+        });
+        reg("mean", [](auto& a, int ln, auto& f) -> Value {
+            ck("mean", a, 1, ln, f);
+            if (a[0].is_vec()) { auto& v = a[0].as_vec(); return Value(v.sum() / (double)v.size()); }
+            if (a[0].is_buffer()) {
+                auto& b = a[0].as_buffer();
+                if (b.data.empty()) return Value(0.0);
+                double s = 0; for (double x : b.data) s += x;
+                return Value(s / (double)b.data.size());
+            }
+            err(f, ln, "mean: expected vec or buffer, got " + value_kind_name(a[0]));
+        });
+        reg("min",  [](auto& a, int ln, auto& f) -> Value {
+            ck("min", a, 1, ln, f);
+            if (a[0].is_vec()) return Value(a[0].as_vec().min());
+            if (a[0].is_buffer()) {
+                auto& b = a[0].as_buffer();
+                if (b.data.empty()) err(f, ln, "min: empty buffer");
+                double m = b.data[0]; for (double x : b.data) if (x < m) m = x;
+                return Value(m);
+            }
+            err(f, ln, "min: expected vec or buffer, got " + value_kind_name(a[0]));
+        });
+        reg("max",  [](auto& a, int ln, auto& f) -> Value {
+            ck("max", a, 1, ln, f);
+            if (a[0].is_vec()) return Value(a[0].as_vec().max());
+            if (a[0].is_buffer()) {
+                auto& b = a[0].as_buffer();
+                if (b.data.empty()) err(f, ln, "max: empty buffer");
+                double m = b.data[0]; for (double x : b.data) if (x > m) m = x;
+                return Value(m);
+            }
+            err(f, ln, "max: expected vec or buffer, got " + value_kind_name(a[0]));
+        });
+
+        // ── vec: element-wise math ────────────────────────────────────
+        auto m1 = [this](const char* nm, const char* doc, Vec(*op)(const Vec&)) {
+            reg_typed(nm, "vec", doc,
+                      [op](auto& a, int, auto&) -> Value {
+                return Value(op(a[0].as_vec()));
+            });
+        };
+        m1("sqrt", "Element-wise square root.",     [](const Vec& v) -> Vec { return std::sqrt(v); });
+        m1("abs",  "Element-wise absolute value.",  [](const Vec& v) -> Vec { return std::abs(v); });
+        m1("sin",  "Element-wise sine.",            [](const Vec& v) -> Vec { return std::sin(v); });
+        m1("cos",  "Element-wise cosine.",          [](const Vec& v) -> Vec { return std::cos(v); });
+        m1("tan",  "Element-wise tangent.",         [](const Vec& v) -> Vec { return std::tan(v); });
+        m1("exp",  "Element-wise e^x.",             [](const Vec& v) -> Vec { return std::exp(v); });
+        m1("log",  "Element-wise natural log.",     [](const Vec& v) -> Vec { return std::log(v); });
+        m1("asin", "Element-wise arc-sine.",        [](const Vec& v) -> Vec { return std::asin(v); });
+        m1("acos", "Element-wise arc-cosine.",      [](const Vec& v) -> Vec { return std::acos(v); });
+        m1("atan", "Element-wise arc-tangent.",     [](const Vec& v) -> Vec { return std::atan(v); });
+
+        reg_typed("floor", "vec",
+                  "Element-wise floor.",
+                  [](auto& a, int, auto&) -> Value {
+            auto& v = a[0].as_vec(); Vec r(v.size());
+            for (size_t i = 0; i < v.size(); ++i) r[i] = std::floor(v[i]);
+            return Value(r);
+        });
+        reg_typed("ceil", "vec",
+                  "Element-wise ceiling.",
+                  [](auto& a, int, auto&) -> Value {
+            auto& v = a[0].as_vec(); Vec r(v.size());
+            for (size_t i = 0; i < v.size(); ++i) r[i] = std::ceil(v[i]);
+            return Value(r);
+        });
+        reg_typed("round", "vec",
+                  "Element-wise round-half-away-from-zero.",
+                  [](auto& a, int, auto&) -> Value {
+            auto& v = a[0].as_vec(); Vec r(v.size());
+            for (size_t i = 0; i < v.size(); ++i) r[i] = std::round(v[i]);
+            return Value(r);
+        });
+        reg_typed("pow", "vec, vec",
+                  "Element-wise pow with broadcasting (a^b).",
+                  [](auto& a, int ln, auto& f) -> Value {
+            // std::pow on valarrays of mismatched sizes is UB in libstdc++,
+            // so broadcast manually.
+            Vec va = a[0].as_vec(), vb = a[1].as_vec();
+            if (va.size() == 1 && vb.size() > 1) { Vec t(vb.size()); t = va[0]; va = t; }
+            if (vb.size() == 1 && va.size() > 1) { Vec t(va.size()); t = vb[0]; vb = t; }
+            if (va.size() != vb.size())
+                err(f, ln, "pow: vector size mismatch (" + std::to_string(va.size()) +
+                           " vs " + std::to_string(vb.size()) + ")");
+            Vec r(va.size());
+            for (size_t i = 0; i < va.size(); ++i) r[i] = std::pow(va[i], vb[i]);
+            return Value(r);
+        });
+        reg_typed("sort", "vec",
+                  "Return a sorted copy (ascending).",
+                  [](auto& a, int, auto&) -> Value {
+            auto v = a[0].as_vec();
+            std::sort(std::begin(v), std::end(v));
+            return Value(v);
+        });
+
+        // ── vec: constructors ─────────────────────────────────────────
+        reg("range", [](auto& a, int ln, auto& f) -> Value {
+            if (a.size() < 1 || a.size() > 3) err(f, ln, "range: expected 1-3 args, got " + std::to_string(a.size()));
+            nv("range", a[0], ln, f);
+            double start = 0, stop, step = 1;
+            if (a.size() == 1) { stop = a[0].scalar(); }
+            else { start = a[0].scalar(); stop = a[1].scalar();
+                   if (a.size() == 3) { nv("range", a[2], ln, f); step = a[2].scalar(); } }
+            int n = std::max(0, (int)std::ceil((stop - start) / step));
+            Vec r(n);
+            for (int i = 0; i < n; ++i) r[i] = start + i * step;
+            return Value(r);
+        });
+        reg_typed("zeros", "int",
+                  "Vec of n zeros.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value(Vec(0.0, (size_t)a[0].scalar()));
+        });
+        reg_typed("ones", "int",
+                  "Vec of n ones.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value(Vec(1.0, (size_t)a[0].scalar()));
+        });
+        reg("rand", [this](auto& a, int ln, auto& f) -> Value {
+            int n = 1;
+            if (!a.empty()) { nv("rand", a[0], ln, f); n = (int)a[0].scalar(); }
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            Vec r(n);
+            for (int i = 0; i < n; ++i) r[i] = dist(rng);
+            return Value(r);
+        });
+        reg("seed", [this](auto& a, int ln, auto& f) -> Value {
+            ck("seed", a, 1, ln, f); nv("seed", a[0], ln, f);
+            rng.seed((uint64_t)a[0].scalar());
+            return Value(nullptr);
+        });
+
+        // ── list operations ───────────────────────────────────────────
+        reg("list", [](auto& a, int, auto&) -> Value {
+            return Value(List(a.begin(), a.end()));
+        });
+        // push: mutates the list in place and returns it (reference semantics).
+        reg_typed("push", "list, any",
+                  "Append a value to the end of a list (mutates).",
+                  [](auto& a, int, auto&) -> Value {
+            a[0].as_list_mut().push_back(a[1]);
+            return a[0];
+        });
+        reg_typed("pop", "list",
+                  "Remove and return the last element of a list (mutates).",
+                  [](auto& a, int ln, auto& f) -> Value {
+            auto& l = a[0].as_list_mut();
+            if (l.empty()) err(f, ln, "pop: empty list");
+            Value v = std::move(l.back());
+            l.pop_back();
+            return v;
+        });
+        reg_typed("insert", "list, int, any",
+                  "Insert a value at the given index of a list (mutates).",
+                  [](auto& a, int ln, auto& f) -> Value {
+            auto& l = a[0].as_list_mut();
+            int i = (int)a[1].scalar();
+            if (i < 0) i += (int)l.size();
+            if (i < 0 || i > (int)l.size()) err(f, ln, "insert: index out of range");
+            l.insert(l.begin() + i, a[2]);
+            return a[0];
+        });
+        // remove: polymorphic — list by index, dict by key.
+        reg("remove", [](auto& a, int ln, auto& f) -> Value {
+            ck("remove", a, 2, ln, f);
+            if (a[0].is_list()) {
+                nv("remove", a[1], ln, f);
+                auto& l = a[0].as_list_mut();
+                int i = (int)a[1].scalar();
+                if (i < 0) i += (int)l.size();
+                if (i < 0 || i >= (int)l.size()) err(f, ln, "remove: index out of range");
+                Value v = std::move(l[i]);
+                l.erase(l.begin() + i);
+                return v;
+            }
+            if (a[0].is_dict()) {
+                ns("remove", a[1], ln, f);
+                auto& d = a[0].as_dict_mut();
+                auto it = d.find(a[1].as_str());
+                if (it == d.end()) return Value(nullptr);
+                Value v = std::move(it->second);
+                d.erase(it);
+                return v;
+            }
+            err(f, ln, "remove expects list or dict");
+        });
+        reg("copy", [](auto& a, int ln, auto& f) -> Value {
+            ck("copy", a, 1, ln, f);
+            if (a[0].is_list())   return Value(List(a[0].as_list()));
+            if (a[0].is_vec())    return Value(Vec(a[0].as_vec()));
+            if (a[0].is_str())    return Value(Str(a[0].as_str()));
+            if (a[0].is_dict())   return Value(std::make_shared<DictMap>(a[0].as_dict()));
+            if (a[0].is_buffer()) return Value(std::make_shared<Buffer>(a[0].as_buffer()));
+            return a[0];
+        });
+
+        // ── dict operations ───────────────────────────────────────────
+        // dict()                — empty dict
+        // dict(list-of-pairs)   — build from list of [key, value] 2-element lists
+        reg("dict", [](auto& a, int ln, auto& f) -> Value {
+            auto d = std::make_shared<DictMap>();
+            if (a.empty()) return Value(d);
+            ck("dict", a, 1, ln, f);
+            if (!a[0].is_list()) err(f, ln, "dict expects a list of [key,value] pairs");
+            for (auto& el : a[0].as_list()) {
+                if (!el.is_list() || el.as_list().size() != 2)
+                    err(f, ln, "dict: each element must be [key,value]");
+                auto& pair = el.as_list();
+                if (!pair[0].is_str()) err(f, ln, "dict: keys must be strings");
+                (*d)[pair[0].as_str()] = pair[1];
+            }
+            return Value(d);
+        });
+        reg_typed("keys", "dict",
+                  "List of keys, sorted.",
+                  [](auto& a, int, auto&) -> Value {
+            std::vector<std::string> ks;
+            for (auto& kv : a[0].as_dict()) ks.push_back(kv.first);
+            std::sort(ks.begin(), ks.end());
+            List out;
+            out.reserve(ks.size());
+            for (auto& k : ks) out.push_back(Value(Str(k)));
+            return Value(std::move(out));
+        });
+        reg_typed("values", "dict",
+                  "List of values, ordered by sorted key.",
+                  [](auto& a, int, auto&) -> Value {
+            auto& d = a[0].as_dict();
+            std::vector<std::string> ks;
+            for (auto& kv : d) ks.push_back(kv.first);
+            std::sort(ks.begin(), ks.end());
+            List out;
+            out.reserve(ks.size());
+            for (auto& k : ks) out.push_back(d.at(k));
+            return Value(std::move(out));
+        });
+        reg_typed("has", "dict, string",
+                  "1 if key is present in dict, 0 otherwise.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value(a[0].as_dict().count(a[1].as_str()) ? 1.0 : 0.0);
+        });
+        reg("get", [](auto& a, int ln, auto& f) -> Value {
+            // get(dict, key)            — returns value or nil
+            // get(dict, key, default)   — returns value or default
+            if (a.size() != 2 && a.size() != 3) err(f, ln, "get: expected 2 or 3 args, got " + std::to_string(a.size()));
+            if (!a[0].is_dict()) err(f, ln, "get: arg 1 expected dict, got " + value_kind_name(a[0]));
+            if (!a[1].is_str())  err(f, ln, "get: arg 2 expected string, got " + value_kind_name(a[1]));
+            auto& d = a[0].as_dict();
+            auto it = d.find(a[1].as_str());
+            if (it != d.end()) return it->second;
+            return a.size() == 3 ? a[2] : Value(nullptr);
+        });
+
+        // ── higher-order: map, filter, reduce, each, apply ────────────
+        reg_typed("map", "list, func",
+                  "Map a function over a list.",
+                  [this](auto& a, int ln, auto& f) -> Value {
+            List out;
+            for (auto& x : a[0].as_list()) out.push_back(call_value(a[1], {x}, ln, f));
+            return Value(std::move(out));
+        });
+        reg_typed("filter", "list, func",
+                  "Keep list items for which the function returns truthy.",
+                  [this](auto& a, int ln, auto& f) -> Value {
+            List out;
+            for (auto& x : a[0].as_list())
+                if (call_value(a[1], {x}, ln, f).truthy()) out.push_back(x);
+            return Value(std::move(out));
+        });
+        reg_typed("reduce", "list, func, any",
+                  "Left fold: accumulate with fn(acc, x) starting from initial.",
+                  [this](auto& a, int ln, auto& f) -> Value {
+            Value acc = a[2];
+            for (auto& x : a[0].as_list()) acc = call_value(a[1], {acc, x}, ln, f);
+            return acc;
+        });
+        reg_typed("each", "list, func",
+                  "Call fn for each item; returns nil.",
+                  [this](auto& a, int ln, auto& f) -> Value {
+            for (auto& x : a[0].as_list()) call_value(a[1], {x}, ln, f);
+            return Value(nullptr);
+        });
+        reg_typed("apply", "func, list",
+                  "Call fn with the values in args as positional arguments.",
+                  [this](auto& a, int ln, auto& f) -> Value {
+            std::vector<Value> args(a[1].as_list().begin(), a[1].as_list().end());
+            return call_value(a[0], args, ln, f);
+        });
+
+        // ── string operations ─────────────────────────────────────────
+        reg_typed("upper", "string",
+                  "Uppercase a string.",
+                  [](auto& a, int, auto&) -> Value {
+            auto s = a[0].as_str();
+            for (auto& c : s) c = std::toupper((unsigned char)c);
+            return Value(Str(s));
+        });
+        reg_typed("lower", "string",
+                  "Lowercase a string.",
+                  [](auto& a, int, auto&) -> Value {
+            auto s = a[0].as_str();
+            for (auto& c : s) c = std::tolower((unsigned char)c);
+            return Value(Str(s));
+        });
+        reg_typed("trim", "string",
+                  "Strip leading and trailing whitespace.",
+                  [](auto& a, int, auto&) -> Value {
+            auto s = a[0].as_str();
+            auto l = s.find_first_not_of(" \t\n\r");
+            if (l == std::string::npos) return Value(Str(""));
+            return Value(Str(s.substr(l, s.find_last_not_of(" \t\n\r") - l + 1)));
+        });
+        reg_typed("split", "string, string",
+                  "Split a string on a separator; returns a list of pieces.",
+                  [](auto& a, int, auto&) -> Value {
+            List parts;
+            auto& s = a[0].as_str();
+            auto& d = a[1].as_str();
+            size_t st = 0, p;
+            while ((p = s.find(d, st)) != std::string::npos) {
+                parts.push_back(Value(Str(s.substr(st, p - st))));
+                st = p + d.size();
+            }
+            parts.push_back(Value(Str(s.substr(st))));
+            return Value(std::move(parts));
+        });
+        reg_typed("join", "list, string",
+                  "Join a list of values into a string with the given separator.",
+                  [](auto& a, int, auto&) -> Value {
+            std::string r;
+            auto& l = a[0].as_list();
+            auto& sep = a[1].as_str();
+            for (size_t i = 0; i < l.size(); ++i) {
+                if (i) r += sep;
+                r += l[i].repr();
+            }
+            return Value(Str(r));
+        });
+        reg_typed("substr", "string, int, int",
+                  "Substring of length n starting at index.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value(Str(a[0].as_str().substr(
+                (size_t)a[1].scalar(), (size_t)a[2].scalar())));
+        });
+        reg_typed("find", "string, string",
+                  "Index of first occurrence of needle in haystack, or -1.",
+                  [](auto& a, int, auto&) -> Value {
+            auto p = a[0].as_str().find(a[1].as_str());
+            return Value(p == std::string::npos ? -1.0 : (double)p);
+        });
+        reg_typed("replace", "string, string, string",
+                  "Replace all occurrences of `find` with `repl` in the source string.",
+                  [](auto& a, int, auto&) -> Value {
+            auto s = a[0].as_str();
+            auto& from = a[1].as_str();
+            auto& to = a[2].as_str();
+            if (from.empty()) return Value(Str(s));
+            size_t p = 0;
+            while ((p = s.find(from, p)) != std::string::npos) {
+                s.replace(p, from.size(), to);
+                p += to.size();
+            }
+            return Value(Str(s));
+        });
+
+        // format("hello {}, you have {} new", name, count)
+        // {{ and }} are escaped braces.
+        reg("format", [](auto& a, int ln, auto& f) -> Value {
+            if (a.empty()) err(f, ln, "format expects at least 1 arg");
+            ns("format", a[0], ln, f);
+            auto& fmt = a[0].as_str();
+            std::string out;
+            size_t arg_idx = 1;
+            for (size_t i = 0; i < fmt.size(); ++i) {
+                if (i + 1 < fmt.size() && fmt[i] == '{' && fmt[i+1] == '{') {
+                    out += '{'; ++i; continue;
+                }
+                if (i + 1 < fmt.size() && fmt[i] == '}' && fmt[i+1] == '}') {
+                    out += '}'; ++i; continue;
+                }
+                if (i + 1 < fmt.size() && fmt[i] == '{' && fmt[i+1] == '}') {
+                    if (arg_idx < a.size()) out += a[arg_idx++].repr();
+                    else out += "{}";
+                    ++i; continue;
+                }
+                out += fmt[i];
+            }
+            return Value(Str(out));
+        });
+
+        // out(args...) — write reprs to stdout with no separator and no newline.
+        reg("out", [](auto& a, int, auto&) -> Value {
+            for (auto& v : a) std::cout << v.repr();
+            std::cout.flush();
+            return Value(nullptr);
+        });
+
+        // ── regex ─────────────────────────────────────────────────────
+        reg_typed("match", "string, string",
+                  "Run pattern against haystack; returns list (full, group1, ...) or nil.",
+                  [](auto& a, int ln, auto& f) -> Value {
+            try {
+                std::regex re(a[1].as_str());
+                std::smatch m;
+                if (std::regex_search(a[0].as_str(), m, re)) {
+                    List l;
+                    for (auto& g : m) l.push_back(Value(Str(g.str())));
+                    return Value(std::move(l));
+                }
+                return Value(nullptr);
+            } catch (std::regex_error&) {
+                err(f, ln, "invalid regex: " + a[1].as_str());
+            }
+        });
+
+        // ── type / conversion ─────────────────────────────────────────
+        reg("type", [](auto& a, int ln, auto& f) -> Value {
+            ck("type", a, 1, ln, f);
+            if (a[0].is_nil()) return Value(Str("nil"));
+            if (a[0].is_vec() && a[0].as_vec().size() == 1) return Value(Str("scalar"));
+            if (a[0].is_vec())    return Value(Str("vec"));
+            if (a[0].is_str())    return Value(Str("string"));
+            if (a[0].is_list())   return Value(Str("list"));
+            if (a[0].is_dict())   return Value(Str("dict"));
+            if (a[0].is_buffer()) return Value(Str("buffer"));
+            if (a[0].is_opaque()) return Value(Str("opaque"));
+            return Value(Str("func"));
+        });
+        reg("str", [](auto& a, int ln, auto& f) -> Value {
+            ck("str", a, 1, ln, f);
+            return Value(Str(a[0].repr()));
+        });
+        reg_typed("num", "string",
+                  "Parse a numeric string. Errors on invalid input.",
+                  [](auto& a, int ln, auto& f) -> Value {
+            try { return Value(std::stod(a[0].as_str())); }
+            catch (...) { err(f, ln, "num: cannot parse '" + a[0].as_str() + "'"); }
+        });
+        reg("vec", [](auto& a, int ln, auto& f) -> Value {
+            ck("vec", a, 1, ln, f);
+            if (a[0].is_list()) {
+                auto& l = a[0].as_list();
+                Vec v(l.size());
+                for (size_t i = 0; i < l.size(); ++i) {
+                    if (!l[i].is_vec()) err(f, ln, "vec: element not numeric, got " + value_kind_name(l[i]));
+                    v[i] = l[i].scalar();
+                }
+                return Value(v);
+            }
+            err(f, ln, "vec: expected list, got " + value_kind_name(a[0]));
+        });
+
+        // ── I/O (relative paths resolved from cwd, not from source file) ─
+        reg_typed("read", "string",
+                  "Read a file's contents as a string.",
+                  [](auto& a, int ln, auto& f) -> Value {
+            auto p = normalize_path(a[0].as_str(), "");
+            std::ifstream fs(p);
+            if (!fs) err(f, ln, "cannot open " + p.string());
+            std::ostringstream ss; ss << fs.rdbuf();
+            return Value(Str(ss.str()));
+        });
+        reg_typed("write", "string, any",
+                  "Write a value to a file (overwriting), serialised as `print` would.",
+                  [](auto& a, int ln, auto& f) -> Value {
+            auto p = normalize_path(a[0].as_str(), "");
+            std::ofstream fs(p);
+            if (!fs) err(f, ln, "cannot open " + p.string());
+            fs << a[1].repr();
+            return Value(nullptr);
+        });
+        reg_typed("append", "string, any",
+                  "Append a value to a file, serialised as `print` would.",
+                  [](auto& a, int ln, auto& f) -> Value {
+            auto p = normalize_path(a[0].as_str(), "");
+            std::ofstream fs(p, std::ios::app);
+            if (!fs) err(f, ln, "cannot open " + p.string());
+            fs << a[1].repr();
+            return Value(nullptr);
+        });
+
+        // ── system ────────────────────────────────────────────────────
+        reg_typed("exec", "string",
+                  "Run a shell command and return its captured stdout.",
+                  [](auto& a, int ln, auto& f) -> Value {
+            std::array<char, 256> buf;
+            std::string out;
+            FILE* p = popen(a[0].as_str().c_str(), "r");
+            if (!p) err(f, ln, "exec failed");
+            while (fgets(buf.data(), buf.size(), p)) out += buf.data();
+            pclose(p);
+            return Value(Str(out));
+        });
+        reg("exit", [](auto& a, int ln, auto& f) -> Value {
+            int code = 0;
+            if (!a.empty()) { nv("exit", a[0], ln, f); code = (int)a[0].scalar(); }
+            std::exit(code);
+            return Value(nullptr);
+        });
+        reg_typed("env", "string",
+                  "Look up an environment variable, or nil if unset.",
+                  [](auto& a, int, auto&) -> Value {
+            auto* v = std::getenv(a[0].as_str().c_str());
+            return v ? Value(Str(v)) : Value(nullptr);
+        });
+        reg("clock", [](auto& a, int, auto&) -> Value {
+            (void)a;
+            auto t = std::chrono::high_resolution_clock::now();
+            return Value((double)std::chrono::duration_cast<std::chrono::microseconds>(
+                t.time_since_epoch()).count() / 1e6);
+        });
+        reg_typed("sleep", "scalar",
+                  "Sleep for n seconds (fractional ok).",
+                  [](auto& a, int, auto&) -> Value {
+            double s = a[0].scalar();
+            if (s < 0) s = 0;
+            std::this_thread::sleep_for(std::chrono::duration<double>(s));
+            return Value(nullptr);
+        });
+        reg("error", [](auto& a, int ln, auto& f) -> Value {
+            ck("error", a, 1, ln, f);
+            err(f, ln, a[0].repr());
+        });
+
+        // ── character codes ───────────────────────────────────────────
+        reg("char", [](auto& a, int ln, auto& f) -> Value {
+            ck("char", a, 1, ln, f); nv("char", a[0], ln, f);
+            int code = (int)a[0].scalar();
+            if (code < 0 || code > 255) err(f, ln, "char: code must be 0-255");
+            return Value(Str(1, (char)code));
+        });
+        reg("asc", [](auto& a, int ln, auto& f) -> Value {
+            ck("asc", a, 1, ln, f); ns("asc", a[0], ln, f);
+            if (a[0].as_str().empty()) err(f, ln, "asc: empty string");
+            return Value((double)(unsigned char)a[0].as_str()[0]);
+        });
+
+        // ── shuffle: returns a shuffled copy ──────────────────────────
+        reg("shuffle", [this](auto& a, int ln, auto& f) -> Value {
+            ck("shuffle", a, 1, ln, f);
+            if (a[0].is_list()) {
+                List l = a[0].as_list();
+                for (size_t i = l.size(); i > 1; --i) {
+                    std::uniform_int_distribution<size_t> dist(0, i - 1);
+                    std::swap(l[i - 1], l[dist(rng)]);
+                }
+                return Value(std::move(l));
+            }
+            if (a[0].is_vec()) {
+                Vec v = a[0].as_vec();
+                for (size_t i = v.size(); i > 1; --i) {
+                    std::uniform_int_distribution<size_t> dist(0, i - 1);
+                    std::swap(v[i - 1], v[dist(rng)]);
+                }
+                return Value(v);
+            }
+            err(f, ln, "shuffle expects list or vec");
+        });
+
+        // ── stdin ─────────────────────────────────────────────────────
+        reg("input", [](auto& a, int ln, auto& f) -> Value {
+            if (a.size() > 1) err(f, ln, "input expects 0 or 1 args");
+            if (!a.empty()) {
+                ns("input", a[0], ln, f);
+                std::cout << a[0].as_str() << std::flush;
+            }
+            std::string line;
+            if (!std::getline(std::cin, line)) return Value(nullptr);
+            return Value(Str(line));
+        });
+
+        // ── buffer (audio) ────────────────────────────────────────────
+        // buffer(frames)              — mono, default sample rate
+        // buffer(frames, channels)    — multi-channel, default sample rate
+        // buffer(frames, channels, sr)
+        reg_doc("buffer",
+                "buffer(frames [, channels [, sample_rate]]) — allocate an audio buffer (interleaved, doubles).",
+                [](auto& a, int ln, auto& f) -> Value {
+            if (a.size() < 1 || a.size() > 3)
+                err(f, ln, "buffer expects 1-3 args (frames [, channels [, sample_rate]])");
+            for (auto& x : a) nv("buffer", x, ln, f);
+            double df = a[0].scalar();
+            if (df < 0) err(f, ln, "buffer: frames must be non-negative (got "
+                                  + Value::fmt(df) + ")");
+            auto b = std::make_shared<Buffer>();
+            b->n_frames = (size_t)df;
+            if (a.size() >= 2) {
+                double dc = a[1].scalar();
+                if (dc < 1) err(f, ln, "buffer: channels must be >= 1 (got "
+                                      + Value::fmt(dc) + ")");
+                b->n_channels = (size_t)dc;
+            } else {
+                b->n_channels = 1;
+            }
+            if (a.size() >= 3) {
+                double sr = a[2].scalar();
+                if (sr <= 0) err(f, ln, "buffer: sample_rate must be positive (got "
+                                       + Value::fmt(sr) + ")");
+                b->sample_rate = sr;
+            } else {
+                b->sample_rate = 44100.0;
+            }
+            b->data.assign(b->n_frames * b->n_channels, 0.0);
+            return Value(b);
+        });
+        reg_typed("frames", "buffer", "Number of frames.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value((double)a[0].as_buffer().n_frames);
+        });
+        reg_typed("channels", "buffer", "Number of channels.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value((double)a[0].as_buffer().n_channels);
+        });
+        reg_typed("sample_rate", "buffer", "Sample rate in Hz.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value(a[0].as_buffer().sample_rate);
+        });
+        // Convert a buffer to a Vec (for arithmetic / DSP in flux).
+        reg_typed("buffer_to_vec", "buffer",
+                  "Return Vec of all samples (interleaved if multi-channel).",
+                  [](auto& a, int, auto&) -> Value {
+            auto& b = a[0].as_buffer();
+            Vec v(b.data.size());
+            for (size_t i = 0; i < b.data.size(); ++i) v[i] = b.data[i];
+            return Value(v);
+        });
+        // Build a mono buffer from a Vec.
+        reg_typed("vec_to_buffer", "vec, scalar?",
+                  "Build a mono buffer from a Vec; optional second arg is sample rate.",
+                  [](auto& a, int, auto&) -> Value {
+            auto b = std::make_shared<Buffer>();
+            auto& v = a[0].as_vec();
+            b->n_frames = v.size();
+            b->n_channels = 1;
+            b->sample_rate = a.size() == 2 ? a[1].scalar() : 44100.0;
+            b->data.assign(v.size(), 0.0);
+            for (size_t i = 0; i < v.size(); ++i) b->data[i] = v[i];
+            return Value(b);
+        });
+
+        // ── opaque ────────────────────────────────────────────────────
+        // No constructor from Flux: opaques originate in C++ host code.
+        // Flux can only inspect the type tag and pass them around.
+        reg_typed("opaque_type", "opaque",
+                  "Return the type tag string of an opaque value.",
+                  [](auto& a, int, auto&) -> Value {
+            return Value(Str(a[0].as_opaque().type_tag));
+        });
+
+        // ── help & introspection ──────────────────────────────────────
+        reg_doc("help",
+                "help(fn|name) — return docstring for a closure or named native.",
+                [this](auto& a, int ln, auto& f) -> Value {
+            ck("help", a, 1, ln, f);
+            if (a[0].is_closure()) {
+                auto& c = a[0].as_closure();
+                if (c.doc.empty() && !c.name.empty()) {
+                    // Try the native_docs registry by closure name as a fallback.
+                    auto it = native_docs.find(c.name);
+                    if (it != native_docs.end()) return Value(Str(it->second));
+                }
+                return Value(Str(c.doc.empty() ? "<no documentation>" : c.doc));
+            }
+            if (a[0].is_native()) {
+                return Value(Str("<native function — call help with its name as a string>"));
+            }
+            if (a[0].is_str()) {
+                auto& name = a[0].as_str();
+                auto it = native_docs.find(name);
+                if (it != native_docs.end()) return Value(Str(it->second));
+                // Look the name up in the global env in case it's a closure.
+                auto* v = global->find(name);
+                if (v && v->is_closure()) {
+                    auto& c = v->as_closure();
+                    return Value(Str(c.doc.empty() ? "<no documentation>" : c.doc));
+                }
+                return Value(Str("<no documentation for: " + name + ">"));
+            }
+            err(f, ln, "help expects a function or its name as a string");
+        });
+
+        // bench(thunk) — call thunk() and return the wall-clock seconds it took.
+        reg_doc("bench",
+                "bench(thunk) — call thunk() and return elapsed wall-clock seconds.",
+                [this](auto& a, int ln, auto& f) -> Value {
+            ck("bench", a, 1, ln, f); nf("bench", a[0], ln, f);
+            auto t0 = std::chrono::high_resolution_clock::now();
+            call_value(a[0], {}, ln, f);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            return Value(std::chrono::duration<double>(t1 - t0).count());
+        });
+
+        // ── constants ─────────────────────────────────────────────────
+        global->def("pi",    Value(3.14159265358979323846));
+        global->def("e",     Value(2.71828182845904523536));
+        global->def("inf",   Value(std::numeric_limits<double>::infinity()));
+        global->def("nil",   Value(nullptr));
+        global->def("true",  Value(1.0));
+        global->def("false", Value(0.0));
+        global->def("flux_version", Value(Str(FLUX_VERSION)));
     }
 
     void repl();
